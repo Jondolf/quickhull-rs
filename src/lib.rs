@@ -12,17 +12,21 @@
 
 #![warn(missing_docs)]
 
-use glam::{DMat4, DVec3};
+mod fixed_hasher;
+use fixed_hasher::FixedHasher;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use glam::{DMat4, DVec3};
+use hashbrown::HashSet;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-/// A polygonal face belonging to a [`ConvexHull`].
+/// A triangular face belonging to a [`ConvexHull`].
 #[derive(Debug, Clone)]
 pub struct Face {
     /// The indices of the face's points.
-    pub indices: Vec<usize>,
+    pub indices: [usize; 3],
     /// The indices of points in front of the face plane, or the points that can "see" the face,
     /// and the distance to each of those points along the normal.
     pub outside_points: Vec<(usize, f64)>,
@@ -42,7 +46,7 @@ impl Face {
         let origin = normal.dot(points_of_face[0]);
 
         Self {
-            indices: indices.to_vec(),
+            indices,
             outside_points: Vec::new(),
             neighbor_faces: Vec::new(),
             normal,
@@ -87,6 +91,7 @@ impl fmt::Display for ErrorKind {
         }
     }
 }
+
 impl Error for ErrorKind {}
 
 /// A 3D convex hull representing the smallest convex set containing
@@ -316,7 +321,7 @@ impl ConvexHull {
     fn update(&mut self, max_iter: Option<usize>) -> Result<(), ErrorKind> {
         let mut face_add_count = *self.faces.keys().last().unwrap() + 1;
         let mut num_iter = 0;
-        let mut assigned_point_indices: HashSet<usize> = HashSet::new();
+        let mut assigned_point_indices = HashSet::with_hasher(FixedHasher);
 
         // Mark the points of the faces as assigned.
         for face in self.faces.values() {
@@ -418,29 +423,15 @@ impl ConvexHull {
 
             // Link the faces to their neighbors.
             for (i, key_a) in new_keys.iter().enumerate() {
-                let points_of_new_face_a: HashSet<_> = self
-                    .faces
-                    .get(key_a)
-                    .unwrap()
-                    .indices
-                    .iter()
-                    .copied()
-                    .collect();
+                let points_of_new_face_a: [usize; 3] = self.faces.get(key_a).unwrap().indices;
 
                 for key_b in new_keys.iter().skip(i + 1) {
-                    let points_of_new_face_b: HashSet<_> = self
-                        .faces
-                        .get(key_b)
-                        .unwrap()
-                        .indices
-                        .iter()
-                        .copied()
-                        .collect();
+                    let points_of_new_face_b: [usize; 3] = self.faces.get(key_b).unwrap().indices;
 
                     let num_intersection_points = points_of_new_face_a
-                        .intersection(&points_of_new_face_b)
-                        .collect::<Vec<_>>()
-                        .len();
+                        .iter()
+                        .filter(|p| points_of_new_face_b.contains(p))
+                        .count();
 
                     if num_intersection_points == 2 {
                         let face_a = self.faces.get_mut(key_a).unwrap();
@@ -464,7 +455,7 @@ impl ConvexHull {
                 let new_face = self.faces.get(new_key).unwrap();
                 let mut degenerate = true;
 
-                for assigned_point_index in &assigned_point_indices {
+                for assigned_point_index in assigned_point_indices.iter() {
                     let position =
                         position_from_face(&self.points, new_face, *assigned_point_index);
 
@@ -489,17 +480,17 @@ impl ConvexHull {
             }
 
             // Assign the orphaned vertices to the new faces.
-            let mut visible_faces = Vec::new();
-            for visible in &visible_set {
-                visible_faces.push(self.faces.get(visible).unwrap().clone());
-            }
+            let visible_faces_outside_points: Vec<Vec<(usize, f64)>> = visible_set
+                .iter()
+                .map(|visible| self.faces.get(visible).unwrap().outside_points.clone())
+                .collect();
 
             for new_key in &new_keys {
                 let new_face = self.faces.get_mut(new_key).unwrap();
-                let mut checked_point_set = HashSet::new();
+                let mut checked_point_set = HashSet::with_hasher(FixedHasher);
 
-                for visible_face in &visible_faces {
-                    for (outside_point_index, _) in visible_face.outside_points.iter() {
+                for outside_points in &visible_faces_outside_points {
+                    for (outside_point_index, _) in outside_points.iter() {
                         if assigned_point_indices.contains(outside_point_index)
                             || checked_point_set.contains(outside_point_index)
                         {
@@ -521,9 +512,10 @@ impl ConvexHull {
             }
 
             // Delete the old visible faces.
-            for visible in visible_set {
-                let visible_face = self.faces.get(&visible).unwrap().clone();
-                for neighbor_key in visible_face.neighbor_faces {
+            for visible in visible_set.iter().copied() {
+                let visible_face_neighbors =
+                    self.faces.get(&visible).unwrap().neighbor_faces.clone();
+                for neighbor_key in visible_face_neighbors {
                     let neighbor = self.faces.get_mut(&neighbor_key).unwrap();
                     let index = neighbor
                         .neighbor_faces
@@ -569,15 +561,11 @@ impl ConvexHull {
         (self.points.to_vec(), indices)
     }
 
-    pub(crate) fn remove_unused_points(&mut self) {
-        let mut indices_list = BTreeSet::new();
+    fn remove_unused_points(&mut self) {
+        // Get the set of unique indices used by the faces.
+        let indices_list = BTreeSet::from_iter(self.faces.values().flat_map(|f| f.indices));
 
-        for face in self.faces.values() {
-            for i in &face.indices {
-                indices_list.insert(*i);
-            }
-        }
-
+        // Map old indices to new indices.
         let indices_list: BTreeMap<usize, usize> = indices_list
             .into_iter()
             .enumerate()
@@ -585,20 +573,17 @@ impl ConvexHull {
             .collect();
 
         for face in self.faces.values_mut() {
-            let mut new_face_indices = Vec::with_capacity(face.indices.len());
-            for i in &face.indices {
-                new_face_indices.push(*indices_list.get(i).unwrap());
+            for i in &mut face.indices {
+                *i = *indices_list.get(i).unwrap();
             }
-            std::mem::swap(&mut face.indices, &mut new_face_indices);
         }
 
-        let mut vertices = Vec::new();
-
-        for (index, _i) in indices_list.iter() {
-            vertices.push(self.points[*index]);
+        // Rebuild the points list.
+        let mut new_points = Vec::with_capacity(indices_list.len());
+        for i in indices_list.keys() {
+            new_points.push(self.points[*i]);
         }
-
-        self.points = vertices;
+        self.points = new_points;
     }
 
     /// Computes the volume of the convex hull.
@@ -655,11 +640,11 @@ fn initialize_visible_set(
     faces: &BTreeMap<usize, Face>,
     face_key: usize,
     face: &Face,
-) -> HashSet<usize> {
-    let mut visible_set = HashSet::new();
+) -> HashSet<usize, FixedHasher> {
+    let mut visible_set = HashSet::with_hasher(FixedHasher);
     visible_set.insert(face_key);
     let mut neighbor_stack: Vec<_> = face.neighbor_faces.to_vec();
-    let mut visited_neighbor = HashSet::new();
+    let mut visited_neighbor = HashSet::with_hasher(FixedHasher);
     while let Some(neighbor_key) = neighbor_stack.pop() {
         if visited_neighbor.contains(&neighbor_key) {
             continue;
@@ -679,11 +664,11 @@ fn initialize_visible_set(
 
 /// Tries to computes the horizon represented as a vector of ridges and the keys of their neighbors.
 fn compute_horizon(
-    visible_set: &HashSet<usize>,
+    visible_set: &HashSet<usize, FixedHasher>,
     faces: &BTreeMap<usize, Face>,
 ) -> Result<Vec<(Vec<usize>, usize)>, ErrorKind> {
     let mut horizon = Vec::new();
-    for visible_key in visible_set {
+    for visible_key in visible_set.iter() {
         let visible_face = faces.get(visible_key).unwrap();
         let points_of_visible_face: HashSet<_> = visible_face.indices.iter().copied().collect();
         if points_of_visible_face.len() != 3 {
