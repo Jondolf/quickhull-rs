@@ -111,8 +111,8 @@ impl core::error::Error for ConvexHull3dError {}
 /// # Example
 ///
 /// ```
-/// use quickhull::ConvexHull3d;
 /// use glam::DVec3;
+/// use quickhull::ConvexHull3d;
 ///
 /// let points = vec![
 ///     DVec3::new(0.0, 0.0, 0.0),

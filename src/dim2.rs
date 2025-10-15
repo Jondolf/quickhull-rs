@@ -1,3 +1,6 @@
+// Adapted from geo:
+// https://github.com/georust/geo/blob/8940db79aa6aa4ec8820d6328c68a2ae08ac8fdc/geo/src/algorithm/convex_hull/qhull.rs
+
 use glam::DVec2;
 
 /// A 2D [convex hull] representing the smallest convex set containing
@@ -10,8 +13,8 @@ use glam::DVec2;
 /// # Example
 ///
 /// ```
-/// use quickhull::ConvexHull2d;
 /// use glam::DVec2;
+/// use quickhull::ConvexHull2d;
 ///
 /// let points = vec![
 ///     DVec2::new(0.0, 0.0),
