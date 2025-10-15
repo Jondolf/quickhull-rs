@@ -5,6 +5,10 @@ A Rust implementation of the Quickhull algorithm for computing [convex hulls] fo
 The 3D algorithm was adapted from [chull](https://github.com/u65xhd/chull),
 focusing on making it more robust, idiomatic, and efficient.
 
+![The Utah teapot and its convex hull](./images/utah_teapot.png)
+
+*The Utah teapot and its convex hull*
+
 [convex hulls]: https://en.wikipedia.org/wiki/Convex_hull
 
 ## References
