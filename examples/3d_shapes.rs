@@ -4,14 +4,12 @@
 use std::f32::consts::PI;
 
 use bevy::{
+    asset::RenderAssetUsages,
     color::palettes::basic::SILVER,
+    mesh::{PrimitiveTopology, VertexAttributeValues},
     pbr::wireframe::{Wireframe, WireframePlugin},
     prelude::*,
-    render::{
-        mesh::{PrimitiveTopology, VertexAttributeValues},
-        render_asset::RenderAssetUsages,
-        render_resource::{Extent3d, TextureDimension, TextureFormat},
-    },
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use quickhull::ConvexHull;
 
@@ -19,7 +17,7 @@ fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins.set(ImagePlugin::default_nearest()),
-            WireframePlugin,
+            WireframePlugin::default(),
         ))
         .add_systems(Startup, setup)
         .add_systems(Update, (rotate, render_convex_hulls))
@@ -71,111 +69,91 @@ fn setup(
     let num_shapes = shapes.len();
 
     for (i, shape) in shapes.into_iter().enumerate() {
-        commands
-            .spawn((
-                PbrBundle {
-                    mesh: shape,
-                    material: debug_material.clone(),
-                    transform: Transform::from_xyz(
-                        -SHAPES_X_EXTENT / 2.
-                            + i as f32 / (num_shapes - 1) as f32 * SHAPES_X_EXTENT,
-                        2.0,
-                        Z_EXTENT / 2.,
-                    )
-                    .with_rotation(Quat::from_rotation_x(-PI / 4.)),
-                    ..default()
-                },
-                Shape,
-            ))
-            .with_children(|commands| {
-                commands.spawn((
-                    PbrBundle {
-                        mesh: meshes.add(Mesh::new(
-                            PrimitiveTopology::default(),
-                            RenderAssetUsages::default(),
-                        )),
-                        transform: Transform::from_scale(Vec3::splat(1.1)),
-                        material: hull_material.clone(),
-                        ..default()
-                    },
-                    Wireframe,
-                ));
-            });
+        commands.spawn((
+            Mesh3d(shape),
+            MeshMaterial3d(debug_material.clone()),
+            Transform::from_xyz(
+                -SHAPES_X_EXTENT / 2. + i as f32 / (num_shapes - 1) as f32 * SHAPES_X_EXTENT,
+                2.0,
+                Z_EXTENT / 2.,
+            )
+            .with_rotation(Quat::from_rotation_x(-PI / 4.)),
+            Shape,
+            children![(
+                Mesh3d(meshes.add(Mesh::new(
+                    PrimitiveTopology::default(),
+                    RenderAssetUsages::default(),
+                ))),
+                MeshMaterial3d(hull_material.clone()),
+                Transform::from_scale(Vec3::splat(1.1)),
+                Wireframe,
+            )],
+        ));
     }
 
     let num_extrusions = extrusions.len();
 
     for (i, shape) in extrusions.into_iter().enumerate() {
-        commands
-            .spawn((
-                PbrBundle {
-                    mesh: shape,
-                    material: debug_material.clone(),
-                    transform: Transform::from_xyz(
-                        -EXTRUSION_X_EXTENT / 2.
-                            + i as f32 / (num_extrusions - 1) as f32 * EXTRUSION_X_EXTENT,
-                        2.0,
-                        -Z_EXTENT / 2.,
-                    )
-                    .with_rotation(Quat::from_rotation_x(-PI / 4.)),
-                    ..default()
-                },
-                Shape,
-            ))
-            .with_children(|commands| {
-                commands.spawn((
-                    PbrBundle {
-                        mesh: meshes.add(Mesh::new(
-                            PrimitiveTopology::default(),
-                            RenderAssetUsages::default(),
-                        )),
-                        material: hull_material.clone(),
-                        transform: Transform::from_scale(Vec3::splat(1.1)),
-                        ..default()
-                    },
-                    Wireframe,
-                ));
-            });
+        commands.spawn((
+            Mesh3d(shape),
+            MeshMaterial3d(debug_material.clone()),
+            Transform::from_xyz(
+                -EXTRUSION_X_EXTENT / 2.
+                    + i as f32 / (num_extrusions - 1) as f32 * EXTRUSION_X_EXTENT,
+                2.0,
+                -Z_EXTENT / 2.,
+            )
+            .with_rotation(Quat::from_rotation_x(-PI / 4.)),
+            Shape,
+            children![(
+                Mesh3d(meshes.add(Mesh::new(
+                    PrimitiveTopology::default(),
+                    RenderAssetUsages::default(),
+                ))),
+                MeshMaterial3d(hull_material.clone()),
+                Transform::from_scale(Vec3::splat(1.1)),
+                Wireframe,
+            )],
+        ));
     }
 
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
+    commands.spawn((
+        PointLight {
             shadows_enabled: true,
             intensity: 10_000_000.,
             range: 100.0,
             shadow_depth_bias: 0.2,
             ..default()
         },
-        transform: Transform::from_xyz(8.0, 16.0, 8.0),
-        ..default()
-    });
+        Transform::from_xyz(8.0, 16.0, 8.0),
+    ));
 
     // ground plane
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Plane3d::default().mesh().size(50.0, 50.0).subdivisions(10)),
-        material: materials.add(Color::from(SILVER)),
-        ..default()
-    });
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0).subdivisions(10))),
+        MeshMaterial3d(materials.add(Color::from(SILVER))),
+    ));
 
-    commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
-        ..default()
-    });
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
+    ));
 
-    /*commands.spawn(
-        TextBundle::from_section("Press space to toggle wireframes", TextStyle::default())
-            .with_style(Style {
-                position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
-                left: Val::Px(12.0),
-                ..default()
-            }),
-    );*/
+    commands.spawn((
+        Text::new("Press space to toggle wireframes"),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+    ));
 }
 
 fn rotate(mut query: Query<&mut Transform, With<Shape>>, time: Res<Time>) {
+    let delta_angle = time.delta_secs() * 0.5;
     for mut transform in &mut query {
-        transform.rotate_y(time.delta_seconds() / 2.);
+        transform.rotate_y(delta_angle);
     }
 }
 
@@ -209,8 +187,8 @@ fn uv_debug_texture() -> Image {
 }
 
 fn render_convex_hulls(
-    query: Query<(&Handle<Mesh>, &Children)>,
-    hull_query: Query<&Handle<Mesh>>,
+    query: Query<(&Mesh3d, &Children)>,
+    hull_query: Query<&Mesh3d>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     for (handle, children) in &query {
@@ -233,12 +211,12 @@ fn render_convex_hulls(
             continue;
         };
 
+        let (vertices, indices) = hull.vertices_indices();
+
         for handle in hull_query.iter_many(children) {
             let Some(mesh) = meshes.get_mut(handle) else {
                 continue;
             };
-
-            let (vertices, indices) = hull.vertices_indices();
 
             mesh.insert_attribute(
                 Mesh::ATTRIBUTE_POSITION,
@@ -248,7 +226,7 @@ fn render_convex_hulls(
                     .collect::<Vec<_>>(),
             );
 
-            mesh.insert_indices(bevy::render::mesh::Indices::U32(
+            mesh.insert_indices(bevy::mesh::Indices::U32(
                 indices.iter().map(|i| *i as u32).collect::<Vec<_>>(),
             ));
 
