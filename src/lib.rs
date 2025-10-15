@@ -26,21 +26,21 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Face {
     /// The indices of the face's points.
-    pub indices: [usize; 3],
+    indices: [usize; 3],
     /// The indices of points in front of the face plane, or the points that can "see" the face,
     /// and the distance to each of those points along the normal.
-    pub outside_points: Vec<(usize, f64)>,
+    outside_points: Vec<(usize, f64)>,
     /// The indices of neighboring faces.
-    pub neighbor_faces: Vec<usize>,
+    neighbor_faces: Vec<usize>,
     /// The normal of the face.
-    pub normal: DVec3,
+    normal: DVec3,
     /// How far away from the origin this face is along its normal.
-    pub distance_from_origin: f64,
+    distance_from_origin: f64,
 }
 
 impl Face {
     /// Creates a [`Face`] using the `points` with the given `indices`.
-    pub fn from_triangle(points: &[DVec3], indices: [usize; 3]) -> Self {
+    fn from_triangle(points: &[DVec3], indices: [usize; 3]) -> Self {
         let points_of_face = indices.map(|i| points[i]);
         let normal = triangle_normal(points_of_face);
         let origin = normal.dot(points_of_face[0]);
@@ -55,9 +55,9 @@ impl Face {
     }
 }
 
-/// The type of error returned during [`ConvexHull`] construction.
+/// An error returned during [`ConvexHull`] construction.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ErrorKind {
+pub enum ConvexHullError {
     /// The given point set is empty, so no convex hull could be computed.
     Empty,
     /// The convex hull generation algorithm encountered degeneracies.
@@ -79,44 +79,73 @@ pub enum DegenerateInput {
     Coplanar,
 }
 
-impl fmt::Display for ErrorKind {
+impl fmt::Display for ConvexHullError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
-            ErrorKind::Empty => write!(f, "empty"),
-            ErrorKind::Degenerated => write!(f, "degenerated"),
-            ErrorKind::DegenerateInput(kind) => write!(f, "degenerate input: {:?}", kind),
-            ErrorKind::RoundOffError(msg) => {
+            ConvexHullError::Empty => write!(f, "empty"),
+            ConvexHullError::Degenerated => write!(f, "degenerated"),
+            ConvexHullError::DegenerateInput(kind) => write!(f, "degenerate input: {:?}", kind),
+            ConvexHullError::RoundOffError(msg) => {
                 write!(f, "erroneous results by roundoff error: {}", msg)
             }
         }
     }
 }
 
-impl Error for ErrorKind {}
+impl Error for ConvexHullError {}
 
-/// A 3D convex hull representing the smallest convex set containing
+/// A 3D [convex hull] representing the smallest convex set containing
 /// all input points in a given point set.
 ///
 /// This can be thought of as a shrink wrapping of a 3D object.
+///
+/// [convex hull]: https://en.wikipedia.org/wiki/Convex_hull
+///
+/// # Example
+///
+/// ```
+/// use quickhull::ConvexHull;
+/// use glam::DVec3;
+///
+/// let points = vec![
+///     DVec3::new(0.0, 0.0, 0.0),
+///     DVec3::new(1.0, 0.0, 0.0),
+///     DVec3::new(0.0, 1.0, 0.0),
+///     DVec3::new(0.0, 0.0, 1.0),
+/// ];
+///
+/// // No limit on the number of iterations.
+/// let max_iter = None;
+///
+/// // Compute the convex hull.
+/// let convex_hull = ConvexHull::try_new(&points, max_iter).unwrap();
+///
+/// // Get the vertices and indices of the convex hull.
+/// let (vertices, indices) = convex_hull.vertices_indices();
+/// ```
 #[derive(Clone, Debug)]
 pub struct ConvexHull {
     /// The points of the convex hull.
-    pub points: Vec<DVec3>,
+    points: Vec<DVec3>,
     /// The faces of the convex hull.
     faces: BTreeMap<usize, Face>,
 }
 
 impl ConvexHull {
     /// Attempts to compute a [`ConvexHull`] for the given set of points.
-    pub fn try_new(points: &[DVec3], max_iter: Option<usize>) -> Result<Self, ErrorKind> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConvexHullError`] if hull construction fails.
+    pub fn try_new(points: &[DVec3], max_iter: Option<usize>) -> Result<Self, ConvexHullError> {
         let num_points = points.len();
 
         if num_points == 0 {
-            return Err(ErrorKind::Empty);
+            return Err(ConvexHullError::Empty);
         }
 
         if num_points <= 3 {
-            return Err(ErrorKind::Degenerated);
+            return Err(ConvexHullError::Degenerated);
         }
 
         // Create the initial simplex, a tetrahedron in 3D.
@@ -129,10 +158,50 @@ impl ConvexHull {
         c_hull.remove_unused_points();
 
         if c_hull.points.len() <= 3 {
-            return Err(ErrorKind::Degenerated);
+            return Err(ConvexHullError::Degenerated);
         }
 
         Ok(c_hull)
+    }
+
+    /// Returns the points of the convex hull.
+    ///
+    /// If you need both vertices and indices, consider using [`ConvexHull::vertices_indices`] instead.
+    #[inline]
+    pub fn points(&self) -> &Vec<DVec3> {
+        &self.points
+    }
+
+    /// Returns the vertices and indices of the convex hull.
+    ///
+    /// If you only need the points, consider using [`ConvexHull::points`] instead.
+    #[inline]
+    pub fn vertices_indices(&self) -> (&Vec<DVec3>, Vec<usize>) {
+        let mut indices = Vec::new();
+        for face in self.faces.values() {
+            for i in &face.indices {
+                indices.push(*i);
+            }
+        }
+        (&self.points, indices)
+    }
+
+    /// Adds the given points, attempting to update the convex hull.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConvexHullError`] if hull construction fails.
+    #[inline]
+    pub fn add_points(&mut self, points: &[DVec3]) -> Result<(), ConvexHullError> {
+        self.points.extend_from_slice(points);
+        self.update(None)?;
+        self.remove_unused_points();
+
+        if self.points.len() <= 3 {
+            return Err(ConvexHullError::Degenerated);
+        }
+
+        Ok(())
     }
 
     /// Computes the minimum and maximum extents for the given point set, along with
@@ -173,7 +242,7 @@ impl ConvexHull {
         (min_vertices, max_vertices)
     }
 
-    fn init_tetrahedron(points: &[DVec3]) -> Result<Self, ErrorKind> {
+    fn init_tetrahedron(points: &[DVec3]) -> Result<Self, ConvexHullError> {
         let (min_indices, max_indices) = Self::compute_extremes(points);
 
         // Get the indices of the vertices used for the initial tetrahedron.
@@ -201,7 +270,7 @@ impl ConvexHull {
                 face.distance_from_origin = -face.distance_from_origin;
             }
             if face.indices.len() != 3 {
-                return Err(ErrorKind::RoundOffError(
+                return Err(ConvexHullError::RoundOffError(
                     "number of face's vertices should be 3".to_string(),
                 ));
             }
@@ -233,7 +302,7 @@ impl ConvexHull {
         points: &[DVec3],
         min_indices: [usize; 3],
         max_indices: [usize; 3],
-    ) -> Result<[usize; 4], ErrorKind> {
+    ) -> Result<[usize; 4], ConvexHullError> {
         let mut indices = [0; 4];
         debug_assert!(
             points.len() > 3,
@@ -255,7 +324,9 @@ impl ConvexHull {
 
         if max_extent == 0.0 {
             // The point cloud seems to consist of a single point.
-            return Err(ErrorKind::DegenerateInput(DegenerateInput::Coincident));
+            return Err(ConvexHullError::DegenerateInput(
+                DegenerateInput::Coincident,
+            ));
         }
 
         // The first two vertices are the ones farthest apart in the maximum dimension.
@@ -285,7 +356,7 @@ impl ConvexHull {
         }
 
         if max_squared_distance == 0.0 {
-            return Err(ErrorKind::DegenerateInput(DegenerateInput::Collinear));
+            return Err(ConvexHullError::DegenerateInput(DegenerateInput::Collinear));
         }
 
         normal = normal.normalize();
@@ -312,13 +383,13 @@ impl ConvexHull {
         }
 
         if max_distance.abs() == 0.0 {
-            return Err(ErrorKind::DegenerateInput(DegenerateInput::Coplanar));
+            return Err(ConvexHullError::DegenerateInput(DegenerateInput::Coplanar));
         }
 
         Ok(indices)
     }
 
-    fn update(&mut self, max_iter: Option<usize>) -> Result<(), ErrorKind> {
+    fn update(&mut self, max_iter: Option<usize>) -> Result<(), ConvexHullError> {
         let mut face_add_count = *self.faces.keys().last().unwrap() + 1;
         let mut num_iter = 0;
         let mut assigned_point_indices = HashSet::with_hasher(FixedHasher);
@@ -398,7 +469,7 @@ impl ConvexHull {
                 }
 
                 if new_face.len() != 3 {
-                    return Err(ErrorKind::RoundOffError(
+                    return Err(ConvexHullError::RoundOffError(
                         "number of new face's vertices should be 3".to_string(),
                     ));
                 }
@@ -416,7 +487,7 @@ impl ConvexHull {
             }
 
             if new_keys.len() < 3 {
-                return Err(ErrorKind::RoundOffError(
+                return Err(ConvexHullError::RoundOffError(
                     "number of new faces should be grater than 3".to_string(),
                 ));
             }
@@ -444,7 +515,7 @@ impl ConvexHull {
 
                 let face_a = self.faces.get(key_a).unwrap();
                 if face_a.neighbor_faces.len() != 3 {
-                    return Err(ErrorKind::RoundOffError(
+                    return Err(ConvexHullError::RoundOffError(
                         "number of neighbors should be 3".to_string(),
                     ));
                 }
@@ -475,7 +546,7 @@ impl ConvexHull {
                 }
 
                 if degenerate {
-                    return Err(ErrorKind::Degenerated);
+                    return Err(ConvexHullError::Degenerated);
                 }
             }
 
@@ -531,34 +602,10 @@ impl ConvexHull {
         }
 
         if !self.is_convex() {
-            return Err(ErrorKind::RoundOffError("concave".to_string()));
+            return Err(ConvexHullError::RoundOffError("concave".to_string()));
         }
 
         Ok(())
-    }
-
-    /// Adds the given points to the point set, attempting to update the convex hull.
-    pub fn add_points(&mut self, points: &[DVec3]) -> Result<(), ErrorKind> {
-        self.points.append(&mut points.to_vec());
-        self.update(None)?;
-        self.remove_unused_points();
-
-        if self.points.len() <= 3 {
-            return Err(ErrorKind::Degenerated);
-        }
-
-        Ok(())
-    }
-
-    /// Returns the vertices and indices of the convex hull.
-    pub fn vertices_indices(&self) -> (Vec<DVec3>, Vec<usize>) {
-        let mut indices = Vec::new();
-        for face in self.faces.values() {
-            for i in &face.indices {
-                indices.push(*i);
-            }
-        }
-        (self.points.to_vec(), indices)
     }
 
     fn remove_unused_points(&mut self) {
@@ -666,13 +713,13 @@ fn initialize_visible_set(
 fn compute_horizon(
     visible_set: &HashSet<usize, FixedHasher>,
     faces: &BTreeMap<usize, Face>,
-) -> Result<Vec<(Vec<usize>, usize)>, ErrorKind> {
+) -> Result<Vec<(Vec<usize>, usize)>, ConvexHullError> {
     let mut horizon = Vec::new();
     for visible_key in visible_set.iter() {
         let visible_face = faces.get(visible_key).unwrap();
         let points_of_visible_face: HashSet<_> = visible_face.indices.iter().copied().collect();
         if points_of_visible_face.len() != 3 {
-            return Err(ErrorKind::RoundOffError(
+            return Err(ConvexHullError::RoundOffError(
                 "number of visible face's vertices should be 3".to_string(),
             ));
         }
@@ -684,7 +731,7 @@ fn compute_horizon(
                 let points_of_unvisible_neighbor: HashSet<_> =
                     unvisible_neighbor.indices.iter().copied().collect();
                 if points_of_unvisible_neighbor.len() != 3 {
-                    return Err(ErrorKind::RoundOffError(
+                    return Err(ConvexHullError::RoundOffError(
                         "number of unvisible face's vertices should be 3".to_string(),
                     ));
                 }
@@ -694,7 +741,7 @@ fn compute_horizon(
                     .copied()
                     .collect();
                 if horizon_ridge.len() != 2 {
-                    return Err(ErrorKind::RoundOffError(
+                    return Err(ConvexHullError::RoundOffError(
                         "number of ridge's vertices should be 2".to_string(),
                     ));
                 }
@@ -703,7 +750,9 @@ fn compute_horizon(
         }
     }
     if horizon.len() < 3 {
-        return Err(ErrorKind::RoundOffError("horizon len < 3".to_string()));
+        return Err(ConvexHullError::RoundOffError(
+            "horizon len < 3".to_string(),
+        ));
     }
     Ok(horizon)
 }
@@ -750,7 +799,9 @@ fn four_points_coincident() {
     assert!(
         matches!(
             result,
-            Err(ErrorKind::DegenerateInput(DegenerateInput::Coincident))
+            Err(ConvexHullError::DegenerateInput(
+                DegenerateInput::Coincident
+            ))
         ),
         "{result:?} should be 'coincident' error"
     );
@@ -764,7 +815,7 @@ fn four_points_collinear() {
     assert!(
         matches!(
             result,
-            Err(ErrorKind::DegenerateInput(DegenerateInput::Collinear))
+            Err(ConvexHullError::DegenerateInput(DegenerateInput::Collinear))
         ),
         "{result:?} should be 'collinear' error"
     );
@@ -779,7 +830,7 @@ fn four_points_coplanar() {
     assert!(
         matches!(
             result,
-            Err(ErrorKind::DegenerateInput(DegenerateInput::Coplanar))
+            Err(ConvexHullError::DegenerateInput(DegenerateInput::Coplanar))
         ),
         "{result:?} should be 'coplanar' error"
     );
@@ -947,7 +998,7 @@ fn flat_test() {
     let p7 = DVec3::new(-1.0, -1.0, 10.0);
     let p8 = DVec3::new(-1.0, -1.0, 10.0);
     assert!(ConvexHull::try_new(&[p1, p2, p3, p4, p5, p6, p7, p8], None)
-        .is_err_and(|err| err == ErrorKind::DegenerateInput(DegenerateInput::Coplanar)));
+        .is_err_and(|err| err == ConvexHullError::DegenerateInput(DegenerateInput::Coplanar)));
 }
 
 #[test]
@@ -956,7 +1007,7 @@ fn line_test() {
         .map(|i| DVec3::new(i as f64, 1.0, 10.0))
         .collect::<Vec<_>>();
     assert!(ConvexHull::try_new(&points, None)
-        .is_err_and(|err| err == ErrorKind::DegenerateInput(DegenerateInput::Collinear)));
+        .is_err_and(|err| err == ConvexHullError::DegenerateInput(DegenerateInput::Collinear)));
 }
 
 #[test]
