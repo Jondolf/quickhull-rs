@@ -11,6 +11,29 @@ focusing on making it more robust, idiomatic, and efficient.
 
 [convex hulls]: https://en.wikipedia.org/wiki/Convex_hull
 
+## 3D Example
+
+```rust
+use glam::DVec3;
+use quickhull::ConvexHull3d;
+
+let points = vec![
+    DVec3::new(0.0, 0.0, 0.0),
+    DVec3::new(1.0, 0.0, 0.0),
+    DVec3::new(0.0, 1.0, 0.0),
+    DVec3::new(0.0, 0.0, 1.0),
+];
+
+// No limit on the number of iterations.
+let max_iter = None;
+
+// Compute the convex hull.
+let hull = ConvexHull3d::try_from_points(&points, max_iter).unwrap();
+
+// Get the vertices and indices of the convex hull.
+let (vertices, indices) = hull.vertices_indices();
+```
+
 ## References
 
 - C. Bradford Barber et al. 1996. [The Quickhull Algorithm for Convex Hulls](https://www.cise.ufl.edu/~ungor/courses/fall06/papers/QuickHull.pdf) (the original paper)
