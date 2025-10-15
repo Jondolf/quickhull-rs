@@ -11,7 +11,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use quickhull::ConvexHull;
+use quickhull::ConvexHull3d;
 
 fn main() {
     App::new()
@@ -197,7 +197,9 @@ fn render_convex_hulls(
             .map(|v| Vec3::from(*v).as_dvec3())
             .collect::<Vec<_>>();
 
-        let Ok(hull) = ConvexHull::try_new(&positions, None).map_err(|e| warn!("{:?}", e)) else {
+        let Ok(hull) =
+            ConvexHull3d::try_from_points(&positions, None).map_err(|e| warn!("{:?}", e))
+        else {
             continue;
         };
 

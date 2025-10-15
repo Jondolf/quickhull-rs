@@ -3,7 +3,7 @@
 A Rust-implementation of the Quickhull algorithm for computing convex hulls for point sets.
 
 This is a simplified and cleaned up version of [chull](https://github.com/u65xhd/chull),
-focusing on making the algorithm robust and efficient for the 2D (note: not implemented yet!) and 3D cases.
+focusing on making the algorithm robust and efficient for the 2D and 3D cases.
 
 ## Warning ⚠️
 
