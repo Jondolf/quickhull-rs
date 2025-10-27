@@ -1,0 +1,980 @@
+mod aabb;
+mod initial_hull;
+mod normalize;
+mod tri_face;
+mod validation;
+
+use crate::{
+    dim3::{
+        initial_hull::{init_tetrahedron, InitialConvexHull3d},
+        tri_face::TriFace,
+    },
+    fixed_hasher::FixedHasher,
+};
+
+use glam::{Mat4, Vec3A};
+use hashbrown::HashSet;
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ptr::fn_addr_eq,
+};
+
+/// An error returned during [`ConvexHull3d`] construction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConvexHull3dError {
+    /// The given point set is empty, so no convex hull could be computed.
+    Empty,
+    /// The convex hull algorithm encountered degeneracies.
+    Degenerated,
+    /// The given point set cannot produce a valid convex hull.
+    DegenerateInput(DegenerateInput),
+    /// Could not find a support point in the given direction.
+    MissingSupportPoint,
+    /// A round-off error.
+    RoundOffError(String),
+}
+
+/// The type of degeneracy for when attempting to compute a convex hull for a point set.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DegenerateInput {
+    /// The input points are approximately equal.
+    Coincident,
+    /// The input points are approximately on the same line.
+    Collinear,
+    /// The input points are approximately on the same plane.
+    Coplanar,
+}
+
+impl core::fmt::Display for ConvexHull3dError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self {
+            ConvexHull3dError::Empty => write!(f, "empty"),
+            ConvexHull3dError::Degenerated => write!(f, "degenerated"),
+            ConvexHull3dError::DegenerateInput(kind) => write!(f, "degenerate input: {:?}", kind),
+            ConvexHull3dError::MissingSupportPoint => {
+                write!(f, "could not find a support point in the given direction")
+            }
+            ConvexHull3dError::RoundOffError(msg) => {
+                write!(f, "erroneous results by roundoff error: {}", msg)
+            }
+        }
+    }
+}
+
+impl core::error::Error for ConvexHull3dError {}
+
+/// A 3D [convex hull] representing the smallest convex set containing
+/// all input points in a given point set.
+///
+/// This can be thought of as a shrink wrapping of a 3D object.
+///
+/// [convex hull]: https://en.wikipedia.org/wiki/Convex_hull
+///
+/// # Example
+///
+/// ```
+/// use glam::Vec3A;
+/// use quickhull::ConvexHull3d;
+///
+/// let points = vec![
+///     Vec3A::new(0.0, 0.0, 0.0),
+///     Vec3A::new(1.0, 0.0, 0.0),
+///     Vec3A::new(0.0, 1.0, 0.0),
+///     Vec3A::new(0.0, 0.0, 1.0),
+/// ];
+///
+/// // No limit on the number of iterations.
+/// let max_iter = None;
+///
+/// // Compute the convex hull.
+/// let hull = ConvexHull3d::try_from_points(&points, max_iter).unwrap();
+///
+/// // Get the vertices and indices of the convex hull.
+/// let (vertices, indices) = hull.vertices_indices();
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct ConvexHull3d {
+    /// The points of the convex hull.
+    points: Vec<Vec3A>,
+    /// The faces of the convex hull.
+    faces: Vec<[u32; 3]>,
+}
+
+impl ConvexHull3d {
+    /// Attempts to compute a [`ConvexHull3d`] for the given set of points.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConvexHullError`] if hull construction fails.
+    pub fn try_from_points(
+        points: &[Vec3A],
+        max_iter: Option<usize>,
+    ) -> Result<Self, ConvexHull3dError> {
+        let num_points = points.len();
+
+        if num_points == 0 {
+            return Err(ConvexHull3dError::Empty);
+        }
+
+        if num_points <= 3 {
+            // TODO: Rename this?
+            return Err(ConvexHull3dError::Degenerated);
+        }
+
+        // Construct a normalized point cloud for better numerical stability.
+        let mut normalized_points = points.to_vec();
+        let _ = normalize::normalize_point_cloud(&mut normalized_points);
+
+        let mut faces: Vec<TriFace>;
+        let mut undecided_points: Vec<u32> = Vec::new();
+
+        // Create the initial simplex.
+        match init_tetrahedron(points, &normalized_points, &mut undecided_points)? {
+            InitialConvexHull3d::Point(points, faces)
+            | InitialConvexHull3d::Segment(points, faces)
+            | InitialConvexHull3d::Triangle(points, faces) => {
+                return Ok(ConvexHull3d { points, faces });
+            }
+            InitialConvexHull3d::Tetrahedron(initial_faces) => {
+                faces = initial_faces;
+            }
+        }
+
+        // Run the main quick hull algorithm.
+        Self::update(
+            &normalized_points,
+            &mut undecided_points,
+            &mut faces,
+            max_iter,
+        )?;
+
+        // Collect the points and valid faces.
+        let mut points: Vec<Vec3A> = points.to_vec();
+        let mut faces: Vec<[u32; 3]> = faces
+            .into_iter()
+            .filter_map(|f| f.valid.then_some(f.indices))
+            .collect();
+
+        // Shrink the hull, removing unused points.
+        Self::remove_unused_points(&mut points, &mut faces);
+
+        Ok(ConvexHull3d { points, faces })
+    }
+
+    /// Returns the points of the convex hull.
+    #[inline]
+    pub fn points(&self) -> &[Vec3A] {
+        &self.points
+    }
+
+    /// Returns the indices of the convex hull's faces.
+    #[inline]
+    pub fn indices(&self) -> &[[u32; 3]] {
+        &self.faces
+    }
+
+    /// Returns the vertices and indices of the convex hull.
+    ///
+    /// This consumes the convex hull.
+    #[inline]
+    pub fn vertices_indices(self) -> (Vec<Vec3A>, Vec<[u32; 3]>) {
+        (self.points, self.faces)
+    }
+
+    /// The main quick hull algorithm.
+    fn update(
+        points: &[Vec3A],
+        undecided_points: &mut Vec<u32>,
+        faces: &mut Vec<TriFace>,
+        max_iter: Option<usize>,
+    ) -> Result<(), ConvexHull3dError> {
+        let mut horizon_faces_and_indices: Vec<(u32, u32)> = Vec::new();
+        let mut horizon_fixing_workspace: Vec<u32> = Vec::with_capacity(points.len());
+        let mut removed_faces: Vec<u32> = Vec::new();
+
+        let max_iter = max_iter.unwrap_or(usize::MAX);
+
+        // The main algorithm of quick hull.
+        //
+        // For each face that has outside points:
+        //
+        // 1. Find the outside point that is farthest from the face, the "eye point".
+        // 2. Find the "horizon", the vertices that form the boundary between the visible
+        //    and non-visible parts of the current hull from the viewpoint of the eye point.
+        // 3. Create faces connecting the horizon vertices to the eye point.
+        // 4. Assign the orphaned vertices to the new faces, and remove the old faces.
+        // 5. Repeat.
+        let mut i = 0;
+        while i != faces.len() {
+            horizon_faces_and_indices.clear();
+
+            if i >= max_iter {
+                break;
+            }
+
+            let face = &mut faces[i];
+
+            if !face.valid || face.affinely_dependent {
+                i += 1;
+                continue;
+            }
+
+            // Select the furthest point.
+            let Some((furthest_point_index, _)) = face.furthest_outside_point else {
+                i += 1;
+                continue;
+            };
+
+            // Mark the face as removed for now.
+            face.valid = false;
+            removed_faces.clear();
+            removed_faces.push(i as u32);
+
+            // Compute the horizon.
+            for j in 0..3 {
+                let face = &faces[i];
+                compute_horizon(
+                    face.neighbors[j],
+                    face.indirect_neighbors[j],
+                    furthest_point_index,
+                    points,
+                    faces,
+                    &mut removed_faces,
+                    &mut horizon_faces_and_indices,
+                );
+            }
+
+            // Due to round-off errors, the horizon may contain self-intersections
+            // or multiple disjoint loops. Fix the horizon topology if needed.
+            fix_horizon_topology(
+                points,
+                faces,
+                &mut removed_faces,
+                &mut horizon_faces_and_indices,
+                &mut horizon_fixing_workspace,
+            )?;
+
+            // Check that the horizon is valid.
+            for (face, id) in horizon_faces_and_indices.iter() {
+                let face = &faces[*face as usize];
+                debug_assert!(
+                    face.valid,
+                    "Horizon contains an invalid face: face {}, adj_index {}",
+                    face.indices[0], id
+                );
+                debug_assert!(
+                    !faces[face.neighbors[*id as usize] as usize].valid,
+                    "Horizon contains a face whose neighbor is valid: face {}, adj_index {}",
+                    face.indices[0], id
+                );
+            }
+
+            if horizon_faces_and_indices.is_empty() {
+                // Due to round-off errors, the horizon could not be computed.
+                let is_any_valid = faces[i + 1..]
+                    .iter()
+                    .any(|f| f.valid && !f.affinely_dependent);
+
+                if is_any_valid {
+                    return Err(ConvexHull3dError::RoundOffError(
+                        "horizon is empty".to_string(),
+                    ));
+                }
+
+                // All remaining faces are invalid, so we are done.
+                faces[i].valid = true;
+                break;
+            }
+
+            // Create and attach new faces.
+            create_and_attach_faces(
+                furthest_point_index,
+                points,
+                faces,
+                &mut removed_faces,
+                undecided_points,
+                &horizon_faces_and_indices,
+            );
+
+            i += 1;
+        }
+
+        /* TODO: Make this validation optional
+        if !self.is_convex() {
+            return Err(ConvexHull3dError::RoundOffError("concave".to_string()));
+        }
+        */
+
+        Ok(())
+    }
+
+    /// Removes unused points from the convex hull.
+    fn remove_unused_points(points: &mut Vec<Vec3A>, faces: &mut [[u32; 3]]) {
+        let mut used: Vec<bool> = vec![false; points.len()];
+        let mut remap: Vec<usize> = (0..points.len()).collect();
+
+        for i in faces.iter() {
+            used[i[0] as usize] = true;
+            used[i[1] as usize] = true;
+            used[i[2] as usize] = true;
+        }
+
+        let mut i = 0;
+        while i < points.len() {
+            if !used[i] {
+                points.swap_remove(i);
+                remap[points.len()] = i;
+                used[i] = used[points.len()];
+            } else {
+                i += 1;
+            }
+        }
+
+        // Remap face indices.
+        for i in faces.iter_mut() {
+            i[0] = remap[i[0] as usize] as u32;
+            i[1] = remap[i[1] as usize] as u32;
+            i[2] = remap[i[2] as usize] as u32;
+        }
+    }
+
+    /// Computes the volume of the convex hull.
+    /// Sums up volumes of tetrahedrons from an arbitrary point to all other points
+    ///
+    /// Returns non-negative value, for extremely small objects might return 0.0
+    pub fn volume(&self) -> f32 {
+        let indices = self.indices();
+        let reference_point = self.points[indices[0][0] as usize].extend(1.0);
+        let mut volume = 0.0;
+        for i in 1..indices.len() {
+            let mut mat = Mat4::ZERO;
+            *mat.col_mut(0) = self.points[indices[i - 1][0] as usize].extend(1.0);
+            *mat.col_mut(1) = self.points[indices[i - 1][1] as usize].extend(1.0);
+            *mat.col_mut(2) = self.points[indices[i - 1][2] as usize].extend(1.0);
+            *mat.col_mut(3) = reference_point;
+            volume += mat.determinant().max(0.0);
+        }
+        volume / 6.0
+    }
+
+    /// Computes the point on the convex hull that is furthest in the given direction.
+    pub fn support_point(&self, direction: Vec3A) -> Vec3A {
+        let mut max = self.points[0].dot(direction);
+        let mut index = 0;
+
+        for (i, point) in self.points.iter().enumerate().skip(1) {
+            let dot_product = point.dot(direction);
+            if dot_product > max {
+                max = dot_product;
+                index = i;
+            }
+        }
+
+        self.points[index]
+    }
+}
+
+/// Computes the horizon of the convex hull from the viewpoint of the given point.
+///
+/// The horizon is represented as a list of ridges (edges) and the unvisible face opposite to each ridge.
+fn compute_horizon(
+    start_face: u32,
+    start_indirect_neighbor: u32,
+    point: u32,
+    points: &[Vec3A],
+    faces: &mut [TriFace],
+    removed_faces: &mut Vec<u32>,
+    horizon_faces_and_indices: &mut Vec<(u32, u32)>,
+) {
+    // Maintain a DFS stack of faces to visit.
+    // Note that this could also be implemented using recursion.
+    let mut stack: Vec<(u32, u32)> = Vec::with_capacity(32);
+    stack.push((start_face, start_indirect_neighbor));
+
+    while let Some((face_index, indirect_neighbor)) = stack.pop() {
+        let face = &mut faces[face_index as usize];
+
+        // Skip already removed faces.
+        if !face.valid {
+            continue;
+        }
+
+        if !face.can_be_seen_by_point_order_independent(point, points) {
+            // Face is not visible, so it's part of the horizon.
+            horizon_faces_and_indices.push((face_index, indirect_neighbor));
+        } else {
+            // Face is visible, so remove it.
+            face.valid = false;
+            removed_faces.push(face_index);
+
+            // Push neighbors to stack.
+            // Note the order: we want to visit neighbor1 before neighbor2,
+            let neighbor2 = face.neighbors[(indirect_neighbor as usize + 2) % 3];
+            let indirect2 = face.indirect_neighbors[(indirect_neighbor as usize + 2) % 3];
+            stack.push((neighbor2, indirect2));
+
+            let neighbor1 = face.neighbors[(indirect_neighbor as usize + 1) % 3];
+            let indirect1 = face.indirect_neighbors[(indirect_neighbor as usize + 1) % 3];
+            stack.push((neighbor1, indirect1));
+        }
+    }
+}
+
+/// Fixes the topology of the horizon if it contains self-intersections or multiple loops.
+fn fix_horizon_topology(
+    points: &[Vec3A],
+    faces: &mut [TriFace],
+    removed_faces: &mut Vec<u32>,
+    horizon_faces_and_indices: &mut Vec<(u32, u32)>,
+    workspace: &mut Vec<u32>,
+) -> Result<(), ConvexHull3dError> {
+    // Clear and resize the workspace.
+    workspace.clear();
+    workspace.resize(points.len(), 0);
+
+    let mut needs_fixing = false;
+
+    for (face, adj_index) in horizon_faces_and_indices.iter() {
+        let point = faces[*face as usize].second_point_from_edge(*adj_index);
+        let workspace_value = &mut workspace[point as usize];
+        *workspace_value += 1;
+
+        // If any edge is used more than once, we need to fix the horizon.
+        if *workspace_value > 1 {
+            needs_fixing = true;
+        }
+    }
+
+    if needs_fixing {
+        // The horizon has multiple loops or self-intersections.
+
+        // First, find which loop we want to keep.
+        let mut loop_start = 0;
+        for (face, adj_index) in horizon_faces_and_indices.iter() {
+            let point1 = points[faces[*face as usize].second_point_from_edge(*adj_index) as usize];
+            let point2 = points[faces[*face as usize].first_point_from_edge(*adj_index) as usize];
+            let support_index = support_point_iterator_position(
+                point2 - point1,
+                points,
+                horizon_faces_and_indices
+                    .iter()
+                    .map(|(f, ai)| faces[*f as usize].second_point_from_edge(*ai) as usize),
+            )
+            .ok_or(ConvexHull3dError::MissingSupportPoint)?;
+            let selected = horizon_faces_and_indices[support_index];
+            if workspace[faces[selected.0 as usize].second_point_from_edge(selected.1) as usize]
+                == 1
+            {
+                // This edge is only used once, so we can start from here.
+                loop_start = support_index;
+                break;
+            }
+        }
+
+        // Now, reconstruct the horizon using only the selected loop.
+        let mut removing_index = None;
+        let old_horizon = core::mem::take(horizon_faces_and_indices);
+
+        for i in 0..old_horizon.len() {
+            let face_id = (loop_start + i) % old_horizon.len();
+            let (face, adj_index) = old_horizon[face_id];
+
+            match removing_index {
+                Some(idx) => {
+                    let point = faces[face as usize].second_point_from_edge(adj_index);
+                    if idx == point as usize {
+                        removing_index = None;
+                    }
+                }
+                _ => {
+                    let point = faces[face as usize].second_point_from_edge(adj_index);
+                    if workspace[point as usize] > 1 {
+                        removing_index = Some(point as usize);
+                    }
+                }
+            }
+
+            if removing_index.is_some() {
+                if faces[face as usize].valid {
+                    faces[face as usize].valid = false;
+                    removed_faces.push(face);
+                }
+            } else {
+                horizon_faces_and_indices.push((face, adj_index));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn create_and_attach_faces(
+    point: u32,
+    points: &[Vec3A],
+    faces: &mut Vec<TriFace>,
+    removed_faces: &mut [u32],
+    undecided_points: &mut Vec<u32>,
+    horizon: &[(u32, u32)],
+) {
+    // We will add the new faces directly to the faces list, so we need to know the current length.
+    let index_offset = faces.len();
+
+    // Reserve space for new faces.
+    faces.reserve(horizon.len());
+
+    // Create new faces connecting the horizon to the point.
+    for (face, adj_index) in horizon.iter().copied() {
+        faces.push(TriFace::from_triangle(
+            points,
+            [
+                point,
+                faces[face as usize].second_point_from_edge(adj_index),
+                faces[face as usize].first_point_from_edge(adj_index),
+            ],
+        ));
+    }
+
+    // Link the new faces to their neighbors.
+    for i in 0..horizon.len() {
+        let previous_face = if i == 0 {
+            index_offset as u32 + (horizon.len() as u32) - 1
+        } else {
+            index_offset as u32 + (i as u32) - 1
+        };
+
+        let (middle_face, middle_id) = horizon[i];
+        let next_face = index_offset as u32 + (i as u32 + 1) % (horizon.len() as u32);
+
+        // Link the new face to its neighbors.
+        let face = &mut faces[index_offset + i];
+        face.set_neighbors(previous_face, middle_face, next_face, 2, middle_id, 0);
+        debug_assert!(
+            !faces[faces[middle_face as usize].neighbors[middle_id as usize] as usize].valid,
+            "tried to overwrite a valid face link"
+        );
+
+        // Link the middle face to the new face.
+        faces[middle_face as usize].neighbors[middle_id as usize] = (index_offset + i) as u32;
+        faces[middle_face as usize].indirect_neighbors[middle_id as usize] = 1;
+    }
+
+    // Reassign outside points from removed faces to the new faces.
+    for face in removed_faces.iter() {
+        // TODO: Avoid cloning the outside points.
+        let outside_points = faces[*face as usize].outside_points.clone();
+        for outside_point_index in outside_points {
+            if points[outside_point_index as usize] == points[point as usize] {
+                continue;
+            }
+
+            let mut best_distance = f32::MIN;
+            let mut best_face_index = None;
+
+            for (i, face) in faces.iter().enumerate().skip(index_offset) {
+                if face.affinely_dependent {
+                    continue;
+                }
+
+                let distance = face.distance_to_point(outside_point_index, points);
+                if distance > best_distance {
+                    best_distance = distance;
+                    best_face_index = Some(i as u32);
+                }
+            }
+
+            if let Some(best_face_index) = best_face_index {
+                let best_face = &mut faces[best_face_index as usize];
+                best_face.try_add_outside_point(outside_point_index, points);
+            }
+
+            // If none of the new faces can see the point, it is implicitly removed,
+            // because it won't be assigned to any face.
+        }
+    }
+
+    // Try to assign collinear points in `undecided_points` to one of the new faces.
+    let mut i = 0;
+    while i != undecided_points.len() {
+        let mut best_distance = f32::MIN;
+        let mut best_face_index = None;
+        let undecided_point_index = undecided_points[i];
+
+        for (j, face) in faces.iter().enumerate().skip(index_offset) {
+            if let Some(distance) = face.distance_to_visible_point(undecided_point_index, points) {
+                if distance > best_distance {
+                    best_distance = distance;
+                    best_face_index = Some(j as u32);
+                }
+            }
+        }
+
+        if let Some(best_face_index) = best_face_index {
+            let best_face = &mut faces[best_face_index as usize];
+            best_face.add_outside_point(undecided_point_index, points);
+            undecided_points.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Finds the support point index in the given iterator of point indices.
+fn support_point_iterator_position<I>(direction: Vec3A, points: &[Vec3A], iter: I) -> Option<usize>
+where
+    I: Iterator<Item = usize>,
+{
+    let mut max_dot = f32::MIN;
+    let mut max_index = None;
+
+    for (k, i) in iter.enumerate() {
+        let point = points[i];
+        let dot = point.dot(direction);
+        if dot > max_dot {
+            max_dot = dot;
+            max_index = Some(k);
+        }
+    }
+
+    max_index
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dim3::tri_face::TriFace;
+
+    use super::*;
+
+    #[test]
+    fn four_points_coincident() {
+        let points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
+
+        let result = ConvexHull3d::try_from_points(&points, None);
+        assert!(
+            matches!(
+                result,
+                Err(ConvexHull3dError::DegenerateInput(
+                    DegenerateInput::Coincident
+                ))
+            ),
+            "{result:?} should be 'coincident' error"
+        );
+    }
+
+    #[test]
+    fn four_points_collinear() {
+        let mut points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
+        points[0].x += f32::EPSILON;
+        let result = ConvexHull3d::try_from_points(&points, None);
+        assert!(
+            matches!(
+                result,
+                Err(ConvexHull3dError::DegenerateInput(
+                    DegenerateInput::Collinear
+                ))
+            ),
+            "{result:?} should be 'collinear' error"
+        );
+    }
+
+    #[test]
+    fn four_points_coplanar() {
+        let mut points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
+        points[0].x += f32::EPSILON;
+        points[1].y += f32::EPSILON;
+        let result = ConvexHull3d::try_from_points(&points, None);
+        assert!(
+            matches!(
+                result,
+                Err(ConvexHull3dError::DegenerateInput(
+                    DegenerateInput::Coplanar
+                ))
+            ),
+            "{result:?} should be 'coplanar' error"
+        );
+    }
+
+    #[test]
+    fn four_points_min_volume() {
+        let mut points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
+        points[0].x += 3.0 * f32::EPSILON;
+        points[1].y += 3.0 * f32::EPSILON;
+        points[2].z += 3.0 * f32::EPSILON;
+        let result = ConvexHull3d::try_from_points(&points, None);
+        assert_eq!(
+            4.3790577010150533e-47,
+            result.expect("this should compute ok").volume()
+        );
+    }
+
+    #[test]
+    fn volume_should_be_positive() {
+        let mut points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
+        points[0].x += 1.0 * f32::EPSILON;
+        points[1].y += 1.0 * f32::EPSILON;
+        points[2].z += 2.0 * f32::EPSILON;
+        let result = ConvexHull3d::try_from_points(&points, None);
+        assert!(result.expect("this should compute ok").volume() > 0.0);
+    }
+
+    #[test]
+    fn inner_outer_test() {
+        let p1 = Vec3A::new(1.0, 0.0, 0.0);
+        let p2 = Vec3A::new(0.0, 1.0, 0.0);
+        let p3 = Vec3A::new(0.0, 0.0, 1.0);
+        let outer_point = Vec3A::new(0.0, 0.0, 10.0);
+        let inner_point = Vec3A::new(0.0, 0.0, 0.0);
+        let whithin_point = Vec3A::new(1.0, 0.0, 0.0);
+        let points = vec![p1, p2, p3, outer_point, inner_point, whithin_point];
+        let face = TriFace::from_triangle(&points, [0, 1, 2]);
+        let can_see_outer = face.can_see_point(3, &points);
+        assert!(can_see_outer);
+        let can_see_inner = face.can_see_point(4, &points);
+        assert!(!can_see_inner);
+    }
+
+    #[test]
+    fn octahedron_test() {
+        let p1 = Vec3A::new(1.0, 0.0, 0.0);
+        let p2 = Vec3A::new(0.0, 1.0, 0.0);
+        let p3 = Vec3A::new(0.0, 0.0, 1.0);
+        let p4 = Vec3A::new(-1.0, 0.0, 0.0);
+        let p5 = Vec3A::new(0.0, -1.0, 0.0);
+        let p6 = Vec3A::new(0.0, 0.0, -1.0);
+        let (_v, i) = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6], None)
+            .unwrap()
+            .vertices_indices();
+        assert_eq!(i.len(), 8 * 3);
+    }
+
+    #[test]
+    fn octahedron_translation_test() {
+        let p1 = Vec3A::new(1.0, 0.0, 0.0);
+        let p2 = Vec3A::new(0.0, 1.0, 0.0);
+        let p3 = Vec3A::new(0.0, 0.0, 1.0);
+        let p4 = Vec3A::new(-1.0, 0.0, 0.0);
+        let p5 = Vec3A::new(0.0, -1.0, 0.0);
+        let p6 = Vec3A::new(0.0, 0.0, -1.0);
+        let points: Vec<_> = [p1, p2, p3, p4, p5, p6]
+            .into_iter()
+            .map(|p| p + Vec3A::splat(10.0))
+            .collect();
+        let (_v, i) = ConvexHull3d::try_from_points(&points, None)
+            .unwrap()
+            .vertices_indices();
+        assert_eq!(i.len(), 8 * 3);
+    }
+
+    #[test]
+    fn cube_test() {
+        let p1 = Vec3A::new(1.0, 1.0, 1.0);
+        let p2 = Vec3A::new(1.0, 1.0, -1.0);
+        let p3 = Vec3A::new(1.0, -1.0, 1.0);
+        let p4 = Vec3A::new(1.0, -1.0, -1.0);
+        let p5 = Vec3A::new(-1.0, 1.0, 1.0);
+        let p6 = Vec3A::new(-1.0, 1.0, -1.0);
+        let p7 = Vec3A::new(-1.0, -1.0, 1.0);
+        let p8 = Vec3A::new(-1.0, -1.0, -1.0);
+        let (_v, i) = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None)
+            .unwrap()
+            .vertices_indices();
+        assert_eq!(i.len(), 6 * 2 * 3);
+    }
+
+    #[test]
+    fn cube_volume_test() {
+        let p1 = Vec3A::new(2.0, 2.0, 2.0);
+        let p2 = Vec3A::new(2.0, 2.0, 0.0);
+        let p3 = Vec3A::new(2.0, 0.0, 2.0);
+        let p4 = Vec3A::new(2.0, 0.0, 0.0);
+        let p5 = Vec3A::new(0.0, 2.0, 2.0);
+        let p6 = Vec3A::new(0.0, 2.0, 0.0);
+        let p7 = Vec3A::new(0.0, 0.0, 2.0);
+        let p8 = Vec3A::new(0.0, 0.0, 0.0);
+        let cube = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None).unwrap();
+        assert_eq!(cube.volume(), 8.0);
+    }
+
+    // Heavy test (~ 0.75s)
+    #[test]
+    fn sphere_volume_test() {
+        let points = sphere_points(50);
+        let hull = ConvexHull3d::try_from_points(&points, None).unwrap();
+        let volume = hull.volume();
+        let expected_volume = 4.0 / 3.0 * std::f32::consts::PI;
+        assert!(
+            (volume - expected_volume).abs() < 0.1,
+            "Expected {expected_volume}, got {volume}"
+        );
+    }
+
+    #[test]
+    fn cube_support_point_test() {
+        let p1 = Vec3A::new(1.0, 1.0, 1.0);
+        let p2 = Vec3A::new(1.0, 1.0, 0.0);
+        let p3 = Vec3A::new(1.0, 0.0, 1.0);
+        let p4 = Vec3A::new(1.0, 0.0, 0.0);
+        let p5 = Vec3A::new(0.0, 1.0, 1.0);
+        let p6 = Vec3A::new(0.0, 1.0, 0.0);
+        let p7 = Vec3A::new(0.0, 0.0, 1.0);
+        let p8 = Vec3A::new(0.0, 0.0, 0.0);
+        let cube = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None).unwrap();
+        assert_eq!(cube.support_point(Vec3A::splat(0.5)), p1);
+    }
+
+    #[test]
+    fn flat_test() {
+        let p1 = Vec3A::new(1.0, 1.0, 10.0);
+        let p2 = Vec3A::new(1.0, 1.0, 10.0);
+        let p3 = Vec3A::new(1.0, -1.0, 10.0);
+        let p4 = Vec3A::new(1.0, -1.0, 10.0);
+        let p5 = Vec3A::new(-1.0, 1.0, 10.0);
+        let p6 = Vec3A::new(-1.0, 1.0, 10.0);
+        let p7 = Vec3A::new(-1.0, -1.0, 10.0);
+        let p8 = Vec3A::new(-1.0, -1.0, 10.0);
+        assert!(
+            ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None).is_err_and(
+                |err| err == ConvexHull3dError::DegenerateInput(DegenerateInput::Coplanar)
+            )
+        );
+    }
+
+    #[test]
+    fn line_test() {
+        let points = (0..10)
+            .map(|i| Vec3A::new(i as f32, 1.0, 10.0))
+            .collect::<Vec<_>>();
+        assert!(ConvexHull3d::try_from_points(&points, None).is_err_and(
+            |err| err == ConvexHull3dError::DegenerateInput(DegenerateInput::Collinear)
+        ));
+    }
+
+    #[test]
+    fn simplex_may_degenerate_test() {
+        let points = vec![
+            Vec3A::new(1.0, 0.0, 1.0),
+            Vec3A::new(1.0, 1.0, 1.0),
+            Vec3A::new(2.0, 1.0, 0.0),
+            Vec3A::new(2.0, 1.0, 1.0),
+            Vec3A::new(2.0, 0.0, 1.0),
+            Vec3A::new(2.0, 0.0, 0.0),
+            Vec3A::new(1.0, 1.0, 2.0),
+            Vec3A::new(0.0, 1.0, 2.0),
+            Vec3A::new(0.0, 0.0, 2.0),
+            Vec3A::new(1.0, 0.0, 2.0),
+        ];
+        let (_v, _i) = ConvexHull3d::try_from_points(&points, None)
+            .unwrap()
+            .vertices_indices();
+    }
+
+    #[test]
+    fn simplex_may_degenerate_test_2() {
+        let vertices = vec![
+            Vec3A::new(0., 0., 0.),
+            Vec3A::new(1., 0., 0.),
+            Vec3A::new(1., 0., 1.),
+            Vec3A::new(0., 0., 1.),
+            Vec3A::new(0., 1., 0.),
+            Vec3A::new(1., 1., 0.),
+            Vec3A::new(1., 1., 1.),
+            Vec3A::new(0., 1., 1.),
+            Vec3A::new(2., 1., 0.),
+            Vec3A::new(2., 1., 1.),
+            Vec3A::new(2., 0., 1.),
+            Vec3A::new(2., 0., 0.),
+            Vec3A::new(1., 1., 2.),
+            Vec3A::new(0., 1., 2.),
+            Vec3A::new(0., 0., 2.),
+            Vec3A::new(1., 0., 2.),
+        ];
+        let indices = [4, 5, 1, 11, 1, 5, 1, 11, 10, 10, 2, 1, 5, 8, 11];
+        let points = indices.iter().map(|i| vertices[*i]).collect::<Vec<_>>();
+        let (_v, _i) = ConvexHull3d::try_from_points(&points, None)
+            .unwrap()
+            .vertices_indices();
+    }
+
+    #[cfg(test)]
+    fn sphere_points(divisions: usize) -> Vec<Vec3A> {
+        fn rot_z(point: Vec3A, angle: f32) -> Vec3A {
+            let e1 = angle.cos() * point[0] - angle.sin() * point[1];
+            let e2 = angle.sin() * point[0] + angle.cos() * point[1];
+            let e3 = point[2];
+            Vec3A::new(e1, e2, e3)
+        }
+        fn rot_x(point: Vec3A, angle: f32) -> Vec3A {
+            let e1 = point[0];
+            let e2 = angle.cos() * point[1] - angle.sin() * point[2];
+            let e3 = angle.sin() * point[1] + angle.cos() * point[2];
+            Vec3A::new(e1, e2, e3)
+        }
+        let mut points = Vec::new();
+        let unit_y = Vec3A::Y;
+        for step_x in 0..divisions {
+            let angle_x = 2.0 * std::f32::consts::PI * (step_x as f32 / divisions as f32);
+            let p = rot_x(unit_y, angle_x);
+            for step_z in 0..divisions {
+                let angle_z = 2.0 * std::f32::consts::PI * (step_z as f32 / divisions as f32);
+                let p = rot_z(p, angle_z);
+                points.push(p);
+            }
+        }
+        points
+    }
+
+    #[test]
+    fn sphere_test() {
+        let points = sphere_points(10);
+        let (_v, _i) = ConvexHull3d::try_from_points(&points, None)
+            .unwrap()
+            .vertices_indices();
+    }
+
+    /// Useful for fuzzing and profiling
+    /// creates a sea-urchin like point cloud
+    /// with points distributed arbitrarily within a sphere
+    #[test]
+    fn heavy_sea_urchin_test() {
+        use rand::prelude::{Distribution, SeedableRng, SliceRandom};
+
+        // increase this to ~1000 to gather more samples for a sampling profiler
+        let iterations = 1;
+
+        for s in 0..iterations {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(s);
+            let dist = rand::distr::StandardUniform;
+
+            fn rot_z(point: Vec3A, angle: f32) -> Vec3A {
+                let e1 = angle.cos() * point[0] - angle.sin() * point[1];
+                let e2 = angle.sin() * point[0] + angle.cos() * point[1];
+                let e3 = point[2];
+                Vec3A::new(e1, e2, e3)
+            }
+            fn rot_x(point: Vec3A, angle: f32) -> Vec3A {
+                let e1 = point[0];
+                let e2 = angle.cos() * point[1] - angle.sin() * point[2];
+                let e3 = angle.sin() * point[1] + angle.cos() * point[2];
+                Vec3A::new(e1, e2, e3)
+            }
+            let mut points = Vec::new();
+            let dev = 100;
+            let unit_y = Vec3A::Y;
+            for step_x in 0..dev {
+                let angle_x = 2.0 * std::f32::consts::PI * (step_x as f32 / dev as f32);
+                let p = rot_x(unit_y, angle_x);
+                for step_z in 0..dev {
+                    let angle_z = 2.0 * std::f32::consts::PI * (step_z as f32 / dev as f32);
+                    let p = rot_z(p, angle_z);
+                    let rand_offset: f32 = dist.sample(&mut rng);
+                    points.push(p * rand_offset);
+                }
+            }
+
+            points.shuffle(&mut rng);
+            let (_v, _i) = ConvexHull3d::try_from_points(&points, None)
+                .unwrap()
+                .vertices_indices();
+        }
+    }
+}

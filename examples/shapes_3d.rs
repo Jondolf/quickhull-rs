@@ -194,7 +194,7 @@ fn render_convex_hulls(
 
         let positions = positions
             .iter()
-            .map(|v| Vec3::from(*v).as_dvec3())
+            .map(|v| Vec3A::from(*v))
             .collect::<Vec<_>>();
 
         let Ok(hull) =
@@ -212,14 +212,11 @@ fn render_convex_hulls(
 
             mesh.insert_attribute(
                 Mesh::ATTRIBUTE_POSITION,
-                vertices
-                    .iter()
-                    .map(|v| v.as_vec3().to_array())
-                    .collect::<Vec<_>>(),
+                vertices.iter().map(|v| v.to_array()).collect::<Vec<_>>(),
             );
 
             mesh.insert_indices(bevy::mesh::Indices::U32(
-                indices.iter().map(|i| *i as u32).collect::<Vec<_>>(),
+                indices.iter().flatten().copied().collect::<Vec<_>>(),
             ));
 
             mesh.duplicate_vertices();

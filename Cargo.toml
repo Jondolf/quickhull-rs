@@ -12,7 +12,9 @@ categories = ["algorithms", "mathematics", "game-development"]
 [dependencies]
 # Math
 glam = "0.30"
+glam_matrix_extras = "0.1"
 robust = "1.1.0"
+approx = "0.5"
 
 # Hashing
 foldhash = "0.2"

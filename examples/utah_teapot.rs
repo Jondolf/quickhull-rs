@@ -6,7 +6,6 @@ use bevy::{
     prelude::*,
     scene::SceneInstanceReady,
 };
-use glam::DVec3;
 
 fn main() {
     App::new()
@@ -83,11 +82,22 @@ fn on_scene_ready(
         points.extend(
             vertex_positions
                 .iter()
-                .map(|&[x, y, z]| DVec3::new(x as f64, y as f64, z as f64)),
+                .map(|&[x, y, z]| Vec3A::new(x, y, z)),
         );
     }
 
+    // Test Parry's convex hull implementation (for comparison).
+    let points_na = points
+        .iter()
+        .map(|p| parry3d::math::Point::new(p.x as f32, p.y as f32, p.z as f32))
+        .collect::<Vec<_>>();
+    let now = std::time::Instant::now();
+    let hull = parry3d::transformation::convex_hull(&points_na);
+    info!("Parry computed convex hull in {:.4?}", now.elapsed());
+    info!("Parry hull has {} indices", hull.1.len());
+
     // Compute the convex hull.
+    let now = std::time::Instant::now();
     let hull = match quickhull::ConvexHull3d::try_from_points(&points, None) {
         Ok(hull) => hull,
         Err(e) => {
@@ -95,13 +105,11 @@ fn on_scene_ready(
             return;
         }
     };
+    info!("Computed convex hull in {:.4?}", now.elapsed());
 
     let (vertices, indices) = hull.vertices_indices();
-    let mesh_vertices: Vec<[f32; 3]> = vertices
-        .iter()
-        .map(|v| [v.x as f32, v.y as f32, v.z as f32])
-        .collect();
-    let mesh_indices: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+    let mesh_vertices: Vec<[f32; 3]> = vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
+    let mesh_indices: Vec<u32> = indices.iter().flatten().cloned().collect();
 
     // Create a mesh from the hull.
     let hull_mesh = Mesh::new(
