@@ -1,10 +1,14 @@
-use approx::{relative_eq, relative_ne};
+use approx::relative_ne;
 use glam::{Vec2, Vec3, Vec3A};
 use glam_matrix_extras::{SymmetricEigen3, SymmetricMat3};
 
 use crate::{
-    dim3::{tri_face::TriFace, validation::validate_face_connectivity},
-    ConvexHull2d, ConvexHull3dError, DegenerateInput,
+    dim3::{
+        triangle_face::{PointId, TriangleFace},
+        validation::validate_face_connectivity,
+        FaceId,
+    },
+    ConvexHull2d, ConvexHull3dError,
 };
 
 /// The initial convex hull structure built from the input points.
@@ -14,7 +18,7 @@ pub enum InitialConvexHull3d {
     Point(Vec<Vec3A>, Vec<[u32; 3]>),
     Segment(Vec<Vec3A>, Vec<[u32; 3]>),
     Triangle(Vec<Vec3A>, Vec<[u32; 3]>),
-    Tetrahedron(Vec<TriFace>),
+    Tetrahedron(Vec<TriangleFace>),
 }
 
 fn cov(points: &[Vec3A]) -> SymmetricMat3 {
@@ -60,7 +64,7 @@ fn degenerate_segment_hull(direction: Vec3A, points: &[Vec3A]) -> (Vec<Vec3A>, V
 pub fn init_tetrahedron(
     points: &[Vec3A],
     normalized_points: &[Vec3A],
-    undecided_points: &mut Vec<u32>,
+    undecided_points: &mut Vec<PointId>,
 ) -> Result<InitialConvexHull3d, ConvexHull3dError> {
     // Compute the eigen decomposition to see if the points are on a lower-dimensional subspace.
     let cov = cov(normalized_points);
@@ -124,7 +128,7 @@ pub fn init_tetrahedron(
             // The hull is a tetrahedron.
 
             // Find the four points that form the initial tetrahedron.
-            let mut indices = [u32::MAX; 4];
+            let mut point_ids = [PointId::PLACEHOLDER; 4];
 
             let principal_axis = Vec3A::from(eig.eigenvectors.z_axis);
 
@@ -135,47 +139,51 @@ pub fn init_tetrahedron(
                 let proj = principal_axis.dot(*point);
                 if proj < min_proj {
                     min_proj = proj;
-                    indices[0] = i as u32;
+                    point_ids[0] = PointId(i as u32);
                 }
                 if proj > max_proj {
                     max_proj = proj;
-                    indices[1] = i as u32;
+                    point_ids[1] = PointId(i as u32);
                 }
             }
 
-            if indices[0] == u32::MAX || indices[1] == u32::MAX {
+            if point_ids[0] == PointId::PLACEHOLDER || point_ids[1] == PointId::PLACEHOLDER {
                 return Err(ConvexHull3dError::MissingSupportPoint);
             }
 
             // The third vertex should be the one farthest from the line segment
             // between the first two vertices.
-            let unit_01 = (points[indices[1] as usize] - points[indices[0] as usize]).normalize();
+            let unit_01 = (points[point_ids[1].index()] - points[point_ids[0].index()]).normalize();
 
             let mut max_squared_distance = 0.0;
 
             for i in 0..points.len() {
-                let diff = points[i] - points[indices[0] as usize];
+                let diff = points[i] - points[point_ids[0].index()];
                 let cross = unit_01.cross(diff);
                 let distance_squared = cross.length_squared();
 
                 if distance_squared > max_squared_distance
-                    && points[i] != points[indices[0] as usize]
-                    && points[i] != points[indices[1] as usize]
+                    && points[i] != points[point_ids[0].index()]
+                    && points[i] != points[point_ids[1].index()]
                 {
                     max_squared_distance = distance_squared;
-                    indices[2] = i as u32;
+                    point_ids[2] = PointId(i as u32);
                 }
             }
 
-            if indices[2] == u32::MAX {
+            if point_ids[2] == PointId::PLACEHOLDER {
                 return Err(ConvexHull3dError::MissingSupportPoint);
             }
 
             // Create two faces with opposite normals.
-            let mut face1 =
-                TriFace::from_triangle(normalized_points, [indices[0], indices[1], indices[2]]);
-            let mut face2 =
-                TriFace::from_triangle(normalized_points, [indices[1], indices[0], indices[2]]);
+            let mut face1 = TriangleFace::from_triangle(
+                normalized_points,
+                [point_ids[0], point_ids[1], point_ids[2]],
+            );
+            let mut face2 = TriangleFace::from_triangle(
+                normalized_points,
+                [point_ids[1], point_ids[0], point_ids[2]],
+            );
 
             // Link the two faces as neighbors.
             face1.set_neighbors(1, 1, 1, 0, 2, 1);
@@ -187,40 +195,40 @@ pub fn init_tetrahedron(
 
             // Add outside points to the two faces.
             for (i, &point) in normalized_points.iter().enumerate() {
-                if point == normalized_points[indices[0] as usize]
-                    || point == normalized_points[indices[1] as usize]
-                    || point == normalized_points[indices[2] as usize]
+                if point == normalized_points[point_ids[0].index()]
+                    || point == normalized_points[point_ids[1].index()]
+                    || point == normalized_points[point_ids[2].index()]
                 {
                     continue;
                 }
 
-                let mut furthest_face_index = u32::MAX;
+                let point_id = PointId(i as u32);
+                let mut furthest_face = FaceId::PLACEHOLDER;
                 let mut max_distance = 0.0;
 
                 for (j, face) in faces.iter().enumerate() {
                     if let Some(distance) =
-                        face.distance_to_visible_point(i as u32, normalized_points)
+                        face.distance_to_visible_point(point_id, normalized_points)
                     {
                         if distance > max_distance {
-                            furthest_face_index = j as u32;
+                            furthest_face = FaceId(j as u32);
                             max_distance = distance;
                         }
                     }
                 }
 
-                if furthest_face_index != u32::MAX {
-                    faces[furthest_face_index as usize]
-                        .try_add_outside_point(i as u32, normalized_points);
+                if furthest_face != FaceId::PLACEHOLDER {
+                    faces[furthest_face.index()].try_add_outside_point(point_id, normalized_points);
                 } else {
-                    undecided_points.push(i as u32);
+                    undecided_points.push(point_id);
                 }
 
                 // If none of the faces can be seen from the point, it is implicitly removed.
             }
 
             // TODO: Make this optional.
-            validate_face_connectivity(0, &faces);
-            validate_face_connectivity(1, &faces);
+            validate_face_connectivity(FaceId(0), &faces);
+            validate_face_connectivity(FaceId(1), &faces);
 
             Ok(InitialConvexHull3d::Tetrahedron(faces))
         }

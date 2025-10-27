@@ -1,24 +1,17 @@
 mod aabb;
 mod initial_hull;
 mod normalize;
-mod tri_face;
+mod triangle_face;
 mod validation;
 
-use crate::{
-    dim3::{
-        initial_hull::{init_tetrahedron, InitialConvexHull3d},
-        tri_face::TriFace,
-    },
-    fixed_hasher::FixedHasher,
+pub use triangle_face::{EdgeIndex, FaceHandle, FaceId, TriangleFace};
+
+use crate::dim3::{
+    initial_hull::{init_tetrahedron, InitialConvexHull3d},
+    triangle_face::PointId,
 };
 
 use glam::{Mat4, Vec3A};
-use hashbrown::HashSet;
-
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ptr::fn_addr_eq,
-};
 
 /// An error returned during [`ConvexHull3d`] construction.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,7 +91,7 @@ pub struct ConvexHull3d {
     /// The points of the convex hull.
     points: Vec<Vec3A>,
     /// The faces of the convex hull.
-    faces: Vec<[u32; 3]>,
+    indices: Vec<[u32; 3]>,
 }
 
 impl ConvexHull3d {
@@ -126,15 +119,18 @@ impl ConvexHull3d {
         let mut normalized_points = points.to_vec();
         let _ = normalize::normalize_point_cloud(&mut normalized_points);
 
-        let mut faces: Vec<TriFace>;
-        let mut undecided_points: Vec<u32> = Vec::new();
+        let mut faces: Vec<TriangleFace>;
+        let mut undecided_points: Vec<PointId> = Vec::new();
 
         // Create the initial simplex.
         match init_tetrahedron(points, &normalized_points, &mut undecided_points)? {
             InitialConvexHull3d::Point(points, faces)
             | InitialConvexHull3d::Segment(points, faces)
             | InitialConvexHull3d::Triangle(points, faces) => {
-                return Ok(ConvexHull3d { points, faces });
+                return Ok(ConvexHull3d {
+                    points,
+                    indices: faces,
+                });
             }
             InitialConvexHull3d::Tetrahedron(initial_faces) => {
                 faces = initial_faces;
@@ -153,13 +149,16 @@ impl ConvexHull3d {
         let mut points: Vec<Vec3A> = points.to_vec();
         let mut faces: Vec<[u32; 3]> = faces
             .into_iter()
-            .filter_map(|f| f.valid.then_some(f.indices))
+            .filter_map(|f| f.valid.then_some(f.points.map(|id| id.0)))
             .collect();
 
         // Shrink the hull, removing unused points.
         Self::remove_unused_points(&mut points, &mut faces);
 
-        Ok(ConvexHull3d { points, faces })
+        Ok(ConvexHull3d {
+            points,
+            indices: faces,
+        })
     }
 
     /// Returns the points of the convex hull.
@@ -171,7 +170,7 @@ impl ConvexHull3d {
     /// Returns the indices of the convex hull's faces.
     #[inline]
     pub fn indices(&self) -> &[[u32; 3]] {
-        &self.faces
+        &self.indices
     }
 
     /// Returns the vertices and indices of the convex hull.
@@ -179,19 +178,19 @@ impl ConvexHull3d {
     /// This consumes the convex hull.
     #[inline]
     pub fn vertices_indices(self) -> (Vec<Vec3A>, Vec<[u32; 3]>) {
-        (self.points, self.faces)
+        (self.points, self.indices)
     }
 
     /// The main quick hull algorithm.
     fn update(
         points: &[Vec3A],
-        undecided_points: &mut Vec<u32>,
-        faces: &mut Vec<TriFace>,
+        undecided_points: &mut Vec<PointId>,
+        faces: &mut Vec<TriangleFace>,
         max_iter: Option<usize>,
     ) -> Result<(), ConvexHull3dError> {
-        let mut horizon_faces_and_indices: Vec<(u32, u32)> = Vec::new();
+        let mut horizon: Vec<FaceHandle> = Vec::new();
         let mut horizon_fixing_workspace: Vec<u32> = Vec::with_capacity(points.len());
-        let mut removed_faces: Vec<u32> = Vec::new();
+        let mut removed_faces: Vec<FaceId> = Vec::new();
 
         let max_iter = max_iter.unwrap_or(usize::MAX);
 
@@ -202,12 +201,13 @@ impl ConvexHull3d {
         // 1. Find the outside point that is farthest from the face, the "eye point".
         // 2. Find the "horizon", the vertices that form the boundary between the visible
         //    and non-visible parts of the current hull from the viewpoint of the eye point.
-        // 3. Create faces connecting the horizon vertices to the eye point.
-        // 4. Assign the orphaned vertices to the new faces, and remove the old faces.
-        // 5. Repeat.
+        // 3. Create new faces connecting the eye point to the horizon.
+        // 4. Reassign outside points from removed faces to the new faces.
+        //
+        // Repeat until no faces with outside points remain or the maximum number of iterations is reached.
         let mut i = 0;
         while i != faces.len() {
-            horizon_faces_and_indices.clear();
+            horizon.clear();
 
             if i >= max_iter {
                 break;
@@ -229,19 +229,18 @@ impl ConvexHull3d {
             // Mark the face as removed for now.
             face.valid = false;
             removed_faces.clear();
-            removed_faces.push(i as u32);
+            removed_faces.push(FaceId(i as u32));
 
             // Compute the horizon.
             for j in 0..3 {
                 let face = &faces[i];
                 compute_horizon(
                     face.neighbors[j],
-                    face.indirect_neighbors[j],
                     furthest_point_index,
                     points,
                     faces,
                     &mut removed_faces,
-                    &mut horizon_faces_and_indices,
+                    &mut horizon,
                 );
             }
 
@@ -251,26 +250,11 @@ impl ConvexHull3d {
                 points,
                 faces,
                 &mut removed_faces,
-                &mut horizon_faces_and_indices,
+                &mut horizon,
                 &mut horizon_fixing_workspace,
             )?;
 
-            // Check that the horizon is valid.
-            for (face, id) in horizon_faces_and_indices.iter() {
-                let face = &faces[*face as usize];
-                debug_assert!(
-                    face.valid,
-                    "Horizon contains an invalid face: face {}, adj_index {}",
-                    face.indices[0], id
-                );
-                debug_assert!(
-                    !faces[face.neighbors[*id as usize] as usize].valid,
-                    "Horizon contains a face whose neighbor is valid: face {}, adj_index {}",
-                    face.indices[0], id
-                );
-            }
-
-            if horizon_faces_and_indices.is_empty() {
+            if horizon.is_empty() {
                 // Due to round-off errors, the horizon could not be computed.
                 let is_any_valid = faces[i + 1..]
                     .iter()
@@ -294,7 +278,7 @@ impl ConvexHull3d {
                 faces,
                 &mut removed_faces,
                 undecided_points,
-                &horizon_faces_and_indices,
+                &horizon,
             );
 
             i += 1;
@@ -309,7 +293,7 @@ impl ConvexHull3d {
         Ok(())
     }
 
-    /// Removes unused points from the convex hull.
+    /// Removes unused points from the given vertex buffer and remaps indices accordingly.
     fn remove_unused_points(points: &mut Vec<Vec3A>, faces: &mut [[u32; 3]]) {
         let mut used: Vec<bool> = vec![false; points.len()];
         let mut remap: Vec<usize> = (0..points.len()).collect();
@@ -379,21 +363,20 @@ impl ConvexHull3d {
 ///
 /// The horizon is represented as a list of ridges (edges) and the unvisible face opposite to each ridge.
 fn compute_horizon(
-    start_face: u32,
-    start_indirect_neighbor: u32,
-    point: u32,
+    start_face: FaceHandle,
+    point: PointId,
     points: &[Vec3A],
-    faces: &mut [TriFace],
-    removed_faces: &mut Vec<u32>,
-    horizon_faces_and_indices: &mut Vec<(u32, u32)>,
+    faces: &mut [TriangleFace],
+    removed_faces: &mut Vec<FaceId>,
+    horizon: &mut Vec<FaceHandle>,
 ) {
     // Maintain a DFS stack of faces to visit.
     // Note that this could also be implemented using recursion.
-    let mut stack: Vec<(u32, u32)> = Vec::with_capacity(32);
-    stack.push((start_face, start_indirect_neighbor));
+    let mut stack: Vec<FaceHandle> = Vec::with_capacity(32);
+    stack.push(start_face);
 
-    while let Some((face_index, indirect_neighbor)) = stack.pop() {
-        let face = &mut faces[face_index as usize];
+    while let Some(handle) = stack.pop() {
+        let face = &mut faces[handle.face.index()];
 
         // Skip already removed faces.
         if !face.valid {
@@ -402,21 +385,18 @@ fn compute_horizon(
 
         if !face.can_be_seen_by_point_order_independent(point, points) {
             // Face is not visible, so it's part of the horizon.
-            horizon_faces_and_indices.push((face_index, indirect_neighbor));
+            horizon.push(handle);
         } else {
             // Face is visible, so remove it.
             face.valid = false;
-            removed_faces.push(face_index);
+            removed_faces.push(handle.face);
 
             // Push neighbors to stack.
             // Note the order: we want to visit neighbor1 before neighbor2,
-            let neighbor2 = face.neighbors[(indirect_neighbor as usize + 2) % 3];
-            let indirect2 = face.indirect_neighbors[(indirect_neighbor as usize + 2) % 3];
-            stack.push((neighbor2, indirect2));
-
-            let neighbor1 = face.neighbors[(indirect_neighbor as usize + 1) % 3];
-            let indirect1 = face.indirect_neighbors[(indirect_neighbor as usize + 1) % 3];
-            stack.push((neighbor1, indirect1));
+            let neighbor2 = face.neighbors[(handle.edge.index() + 2) % 3];
+            let neighbor1 = face.neighbors[(handle.edge.index() + 1) % 3];
+            stack.push(neighbor2);
+            stack.push(neighbor1);
         }
     }
 }
@@ -424,9 +404,10 @@ fn compute_horizon(
 /// Fixes the topology of the horizon if it contains self-intersections or multiple loops.
 fn fix_horizon_topology(
     points: &[Vec3A],
-    faces: &mut [TriFace],
-    removed_faces: &mut Vec<u32>,
-    horizon_faces_and_indices: &mut Vec<(u32, u32)>,
+    faces: &mut [TriangleFace],
+    removed_faces: &mut Vec<FaceId>,
+    horizon: &mut Vec<FaceHandle>,
+    // TODO: We can probably use u16 or even u8 here.
     workspace: &mut Vec<u32>,
 ) -> Result<(), ConvexHull3dError> {
     // Clear and resize the workspace.
@@ -435,9 +416,9 @@ fn fix_horizon_topology(
 
     let mut needs_fixing = false;
 
-    for (face, adj_index) in horizon_faces_and_indices.iter() {
-        let point = faces[*face as usize].second_point_from_edge(*adj_index);
-        let workspace_value = &mut workspace[point as usize];
+    for handle in horizon.iter() {
+        let point = faces[handle.face.index()].second_point_from_edge(handle.edge);
+        let workspace_value = &mut workspace[point.index()];
         *workspace_value += 1;
 
         // If any edge is used more than once, we need to fix the horizon.
@@ -451,19 +432,24 @@ fn fix_horizon_topology(
 
         // First, find which loop we want to keep.
         let mut loop_start = 0;
-        for (face, adj_index) in horizon_faces_and_indices.iter() {
-            let point1 = points[faces[*face as usize].second_point_from_edge(*adj_index) as usize];
-            let point2 = points[faces[*face as usize].first_point_from_edge(*adj_index) as usize];
+        for &FaceHandle { face, edge } in horizon.iter() {
+            let point1 = points[faces[face.index()].second_point_from_edge(edge).index()];
+            let point2 = points[faces[face.index()].first_point_from_edge(edge).index()];
+            let direction = point2 - point1;
+
             let support_index = support_point_iterator_position(
-                point2 - point1,
+                direction,
                 points,
-                horizon_faces_and_indices
+                horizon
                     .iter()
-                    .map(|(f, ai)| faces[*f as usize].second_point_from_edge(*ai) as usize),
+                    .map(|h| faces[h.face.index()].second_point_from_edge(h.edge).index()),
             )
             .ok_or(ConvexHull3dError::MissingSupportPoint)?;
-            let selected = horizon_faces_and_indices[support_index];
-            if workspace[faces[selected.0 as usize].second_point_from_edge(selected.1) as usize]
+            let selected = horizon[support_index];
+
+            if workspace[faces[selected.face.index()]
+                .second_point_from_edge(selected.edge)
+                .index()]
                 == 1
             {
                 // This edge is only used once, so we can start from here.
@@ -474,34 +460,34 @@ fn fix_horizon_topology(
 
         // Now, reconstruct the horizon using only the selected loop.
         let mut removing_index = None;
-        let old_horizon = core::mem::take(horizon_faces_and_indices);
+        let old_horizon = core::mem::take(horizon);
 
         for i in 0..old_horizon.len() {
-            let face_id = (loop_start + i) % old_horizon.len();
-            let (face, adj_index) = old_horizon[face_id];
+            let face_index = (loop_start + i) % old_horizon.len();
+            let FaceHandle { face, edge } = old_horizon[face_index];
 
             match removing_index {
                 Some(idx) => {
-                    let point = faces[face as usize].second_point_from_edge(adj_index);
-                    if idx == point as usize {
+                    let point = faces[face.index()].second_point_from_edge(edge);
+                    if idx == point.index() {
                         removing_index = None;
                     }
                 }
                 _ => {
-                    let point = faces[face as usize].second_point_from_edge(adj_index);
-                    if workspace[point as usize] > 1 {
-                        removing_index = Some(point as usize);
+                    let point = faces[face.index()].second_point_from_edge(edge);
+                    if workspace[point.index()] > 1 {
+                        removing_index = Some(point.index());
                     }
                 }
             }
 
             if removing_index.is_some() {
-                if faces[face as usize].valid {
-                    faces[face as usize].valid = false;
+                if faces[face.index()].valid {
+                    faces[face.index()].valid = false;
                     removed_faces.push(face);
                 }
             } else {
-                horizon_faces_and_indices.push((face, adj_index));
+                horizon.push(FaceHandle::new(face, edge));
             }
         }
     }
@@ -510,12 +496,12 @@ fn fix_horizon_topology(
 }
 
 fn create_and_attach_faces(
-    point: u32,
+    point: PointId,
     points: &[Vec3A],
-    faces: &mut Vec<TriFace>,
-    removed_faces: &mut [u32],
-    undecided_points: &mut Vec<u32>,
-    horizon: &[(u32, u32)],
+    faces: &mut Vec<TriangleFace>,
+    removed_faces: &mut [FaceId],
+    undecided_points: &mut Vec<PointId>,
+    horizon: &[FaceHandle],
 ) {
     // We will add the new faces directly to the faces list, so we need to know the current length.
     let index_offset = faces.len();
@@ -524,13 +510,13 @@ fn create_and_attach_faces(
     faces.reserve(horizon.len());
 
     // Create new faces connecting the horizon to the point.
-    for (face, adj_index) in horizon.iter().copied() {
-        faces.push(TriFace::from_triangle(
+    for FaceHandle { face, edge } in horizon.iter().copied() {
+        faces.push(TriangleFace::from_triangle(
             points,
             [
                 point,
-                faces[face as usize].second_point_from_edge(adj_index),
-                faces[face as usize].first_point_from_edge(adj_index),
+                faces[face.index()].second_point_from_edge(edge),
+                faces[face.index()].first_point_from_edge(edge),
             ],
         ));
     }
@@ -543,33 +529,38 @@ fn create_and_attach_faces(
             index_offset as u32 + (i as u32) - 1
         };
 
-        let (middle_face, middle_id) = horizon[i];
+        let middle = horizon[i];
         let next_face = index_offset as u32 + (i as u32 + 1) % (horizon.len() as u32);
 
         // Link the new face to its neighbors.
         let face = &mut faces[index_offset + i];
-        face.set_neighbors(previous_face, middle_face, next_face, 2, middle_id, 0);
+        face.set_neighbors(previous_face, middle.face, next_face, 2, middle.edge, 0);
         debug_assert!(
-            !faces[faces[middle_face as usize].neighbors[middle_id as usize] as usize].valid,
+            !faces[faces[middle.face.index()]
+                .neighbor(middle.edge)
+                .face
+                .index()]
+            .valid,
             "tried to overwrite a valid face link"
         );
 
         // Link the middle face to the new face.
-        faces[middle_face as usize].neighbors[middle_id as usize] = (index_offset + i) as u32;
-        faces[middle_face as usize].indirect_neighbors[middle_id as usize] = 1;
+        let middle_face_neighbor = faces[middle.face.index()].neighbor_mut(middle.edge);
+        middle_face_neighbor.face.0 = (index_offset + i) as u32;
+        middle_face_neighbor.edge.0 = 1;
     }
 
     // Reassign outside points from removed faces to the new faces.
     for face in removed_faces.iter() {
         // TODO: Avoid cloning the outside points.
-        let outside_points = faces[*face as usize].outside_points.clone();
+        let outside_points = faces[face.index()].outside_points.clone();
         for outside_point_index in outside_points {
-            if points[outside_point_index as usize] == points[point as usize] {
+            if points[outside_point_index.index()] == points[point.index()] {
                 continue;
             }
 
             let mut best_distance = f32::MIN;
-            let mut best_face_index = None;
+            let mut best_face = None;
 
             for (i, face) in faces.iter().enumerate().skip(index_offset) {
                 if face.affinely_dependent {
@@ -579,12 +570,12 @@ fn create_and_attach_faces(
                 let distance = face.distance_to_point(outside_point_index, points);
                 if distance > best_distance {
                     best_distance = distance;
-                    best_face_index = Some(i as u32);
+                    best_face = Some(FaceId(i as u32));
                 }
             }
 
-            if let Some(best_face_index) = best_face_index {
-                let best_face = &mut faces[best_face_index as usize];
+            if let Some(best_face) = best_face {
+                let best_face = &mut faces[best_face.index()];
                 best_face.try_add_outside_point(outside_point_index, points);
             }
 
@@ -641,7 +632,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::dim3::tri_face::TriFace;
+    use crate::dim3::triangle_face::TriangleFace;
 
     use super::*;
 
@@ -726,10 +717,10 @@ mod tests {
         let inner_point = Vec3A::new(0.0, 0.0, 0.0);
         let whithin_point = Vec3A::new(1.0, 0.0, 0.0);
         let points = vec![p1, p2, p3, outer_point, inner_point, whithin_point];
-        let face = TriFace::from_triangle(&points, [0, 1, 2]);
-        let can_see_outer = face.can_see_point(3, &points);
+        let face = TriangleFace::from_triangle(&points, [PointId(0), PointId(1), PointId(2)]);
+        let can_see_outer = face.can_see_point(PointId(3), &points);
         assert!(can_see_outer);
-        let can_see_inner = face.can_see_point(4, &points);
+        let can_see_inner = face.can_see_point(PointId(4), &points);
         assert!(!can_see_inner);
     }
 

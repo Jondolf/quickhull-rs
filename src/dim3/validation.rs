@@ -1,40 +1,33 @@
-use crate::dim3::tri_face::TriFace;
+use crate::dim3::{triangle_face::TriangleFace, EdgeIndex, FaceId};
 
-pub fn validate_face_connectivity(face_index: u32, faces: &[TriFace]) {
-    let face = &faces[face_index as usize];
+pub fn validate_face_connectivity(face_id: FaceId, faces: &[TriangleFace]) {
+    let face = &faces[face_id.index()];
 
     for i in 0..3 {
-        let neighbor_index = face.neighbors[i];
-        let neighbor = &faces[neighbor_index as usize];
+        let edge = EdgeIndex(i as u32);
+        let neighbor = face.neighbor(edge);
+        let neighbor_face = &faces[neighbor.face.index()];
 
-        assert!(neighbor.valid, "Neighbor face is not valid.");
+        assert!(neighbor_face.valid, "Neighbor face is not valid.");
+
+        // Check that the neighbor face points back to this face.
         assert_eq!(
-            neighbor.neighbors[face.indirect_neighbors[i] as usize],
-            face_index,
-            "Neighbor face does not point back correctly. face_index: {}, neighbor_index: {}, i: {}",
-            face_index, neighbor_index, i
+            neighbor_face.neighbor(face.neighbor(edge).edge).face,
+            face_id,
         );
         assert_eq!(
-            neighbor.indirect_neighbors[face.indirect_neighbors[i] as usize],
-            i as u32,
-            "Neighbor face indirect neighbor does not point back correctly. face_index: {}, neighbor_index: {}, i: {}",
-            face_index, neighbor_index, i
+            neighbor_face.neighbor(face.neighbor(edge).edge).edge,
+            EdgeIndex(i as u32),
+        );
+
+        // Check that the points across the shared edge match.
+        assert_eq!(
+            neighbor_face.first_point_from_edge(face.neighbor(edge).edge),
+            face.second_point_from_edge(EdgeIndex(i as u32)),
         );
         assert_eq!(
-            neighbor.first_point_from_edge(face.indirect_neighbors[i]),
-            face.second_point_from_edge(i as u32),
-            "Neighbor face edge points do not match. face_index: {}, neighbor_index: {}, i: {}",
-            face_index,
-            neighbor_index,
-            i
-        );
-        assert_eq!(
-            neighbor.second_point_from_edge(face.indirect_neighbors[i]),
-            face.first_point_from_edge(i as u32),
-            "Neighbor face edge points do not match. face_index: {}, neighbor_index: {}, i: {}",
-            face_index,
-            neighbor_index,
-            i
+            neighbor_face.second_point_from_edge(face.neighbor(edge).edge),
+            face.first_point_from_edge(EdgeIndex(i as u32)),
         );
     }
 }
