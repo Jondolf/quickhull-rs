@@ -11,8 +11,13 @@ use crate::dim3::aabb::Aabb3d;
 pub fn normalize_point_cloud(points: &mut [Vec3A]) -> Aabb3d {
     let aabb = Aabb3d::from_points(points);
     let diagonal = aabb.diagonal();
+    let max_diagonal_element = diagonal.max_element();
     let center = aabb.center();
-    let scale = 2.0 / diagonal.max_element();
+    let scale = if max_diagonal_element == 0.0 {
+        0.0
+    } else {
+        2.0 / max_diagonal_element
+    };
 
     for p in points.iter_mut() {
         *p = (*p - center) * scale;
