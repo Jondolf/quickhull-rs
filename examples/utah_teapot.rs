@@ -1,3 +1,5 @@
+//! Demonstrates computing the convex hull of the Utah teapot model.
+
 use bevy::{
     asset::RenderAssetUsages,
     camera::Exposure,
@@ -86,18 +88,7 @@ fn on_scene_ready(
         );
     }
 
-    // Test Parry's convex hull implementation (for comparison).
-    let points_na = points
-        .iter()
-        .map(|p| parry3d::math::Point::new(p.x as f32, p.y as f32, p.z as f32))
-        .collect::<Vec<_>>();
-    let now = std::time::Instant::now();
-    let hull = parry3d::transformation::convex_hull(&points_na);
-    info!("Parry computed convex hull in {:.4?}", now.elapsed());
-    info!("Parry hull has {} indices", hull.1.len());
-
     // Compute the convex hull.
-    let now = std::time::Instant::now();
     let hull = match quickhull::ConvexHull3d::try_from_points(&points, None) {
         Ok(hull) => hull,
         Err(e) => {
@@ -105,7 +96,6 @@ fn on_scene_ready(
             return;
         }
     };
-    info!("Computed convex hull in {:.4?}", now.elapsed());
 
     let (vertices, indices) = hull.vertices_indices();
     let mesh_vertices: Vec<[f32; 3]> = vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
