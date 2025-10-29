@@ -143,12 +143,6 @@ impl TriangleFace {
         }
     }
 
-    /// Returns whether the face is valid (not removed).
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        self.valid
-    }
-
     /// Returns the neighboring face across the edge at the given index.
     #[inline]
     pub fn neighbor(&self, edge_index: EdgeIndex) -> FaceHandle {
@@ -187,12 +181,6 @@ impl TriangleFace {
     #[inline]
     pub fn second_point_from_edge(&self, edge_index: EdgeIndex) -> PointId {
         self.points[(edge_index.index() + 1) % 3]
-    }
-
-    /// Determines whether the face can be "seen" from the given point.
-    #[inline]
-    pub fn can_see_point(&self, point_id: PointId, points: &[Vec3A]) -> bool {
-        self.distance_to_visible_point(point_id, points).is_some()
     }
 
     /// Determines whether the face can be "seen" by the given point, in an order-independent manner,

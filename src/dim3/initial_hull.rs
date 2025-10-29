@@ -226,9 +226,12 @@ pub fn init_tetrahedron(
                 // If none of the faces can be seen from the point, it is implicitly removed.
             }
 
-            // TODO: Make this optional.
+            // TODO: Make this optional behind a feature flag or something.
+            #[cfg(debug_assertions)]
+            {
             validate_face_connectivity(FaceId(0), &faces);
             validate_face_connectivity(FaceId(1), &faces);
+            }
 
             Ok(InitialConvexHull3d::Tetrahedron(faces))
         }

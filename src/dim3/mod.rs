@@ -707,9 +707,13 @@ mod tests {
         let whithin_point = Vec3A::new(1.0, 0.0, 0.0);
         let points = vec![p1, p2, p3, outer_point, inner_point, whithin_point];
         let face = TriangleFace::from_triangle(&points, [PointId(0), PointId(1), PointId(2)]);
-        let can_see_outer = face.can_see_point(PointId(3), &points);
+        let can_see_outer = face
+            .distance_to_visible_point(PointId(3), &points)
+            .is_some();
         assert!(can_see_outer);
-        let can_see_inner = face.can_see_point(PointId(4), &points);
+        let can_see_inner = face
+            .distance_to_visible_point(PointId(4), &points)
+            .is_some();
         assert!(!can_see_inner);
     }
 

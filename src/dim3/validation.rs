@@ -31,3 +31,5 @@ pub fn validate_face_connectivity(face_id: FaceId, faces: &[TriangleFace]) {
         );
     }
 }
+
+// TODO: Validate that the hull is properly formed and convex.
