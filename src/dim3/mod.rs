@@ -1,4 +1,6 @@
-mod aabb;
+// Adapted primarily from `parry3d`:
+// <https://github.com/dimforge/parry/blob/9db68641adf69e1f307ac9199d34d82b6d049219/src/transformation/convex_hull3/convex_hull.rs>
+
 mod initial_hull;
 mod normalize;
 mod triangle_face;
@@ -11,7 +13,7 @@ use crate::dim3::{
     triangle_face::PointId,
 };
 
-use glam::{Mat4, Vec3A};
+use glam::Vec3A;
 
 /// An error returned during [`ConvexHull3d`] construction.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +72,7 @@ impl core::error::Error for ConvexHull3dError {}
 /// use glam::Vec3A;
 /// use quickhull::ConvexHull3d;
 ///
+/// // Define a set of 3D points.
 /// let points = vec![
 ///     Vec3A::new(0.0, 0.0, 0.0),
 ///     Vec3A::new(1.0, 0.0, 0.0),
@@ -85,6 +88,10 @@ impl core::error::Error for ConvexHull3dError {}
 ///
 /// // Get the vertices and indices of the convex hull.
 /// let (vertices, indices) = hull.vertices_indices();
+///
+/// // The hull should be a tetrahedron with 4 vertices and 4 triangular faces.
+/// assert_eq!(vertices.len(), 4);
+/// assert_eq!(indices.len(), 4);
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct ConvexHull3d {
@@ -97,9 +104,12 @@ pub struct ConvexHull3d {
 impl ConvexHull3d {
     /// Attempts to compute a [`ConvexHull3d`] for the given set of points.
     ///
+    /// `max_iter` specifies the maximum number of iterations to perform.
+    /// If `None`, the algorithm will run until completion.
+    ///
     /// # Errors
     ///
-    /// Returns a [`ConvexHullError`] if hull construction fails.
+    /// Returns a [`ConvexHull3dError`] if hull construction fails.
     pub fn try_from_points(
         points: &[Vec3A],
         max_iter: Option<usize>,
@@ -117,7 +127,7 @@ impl ConvexHull3d {
 
         // Construct a normalized point cloud for better numerical stability.
         let mut normalized_points = points.to_vec();
-        let _ = normalize::normalize_point_cloud(&mut normalized_points);
+        normalize::normalize_point_cloud(&mut normalized_points);
 
         let mut faces: Vec<TriangleFace>;
         let mut undecided_points: Vec<PointId> = Vec::new();
@@ -137,7 +147,7 @@ impl ConvexHull3d {
             }
         }
 
-        // Run the main quick hull algorithm.
+        // Run the main quickhull algorithm.
         Self::update(
             &normalized_points,
             &mut undecided_points,
@@ -181,7 +191,7 @@ impl ConvexHull3d {
         (self.points, self.indices)
     }
 
-    /// The main quick hull algorithm.
+    /// The main quickhull algorithm.
     fn update(
         points: &[Vec3A],
         undecided_points: &mut Vec<PointId>,
@@ -194,7 +204,7 @@ impl ConvexHull3d {
 
         let max_iter = max_iter.unwrap_or(usize::MAX);
 
-        // The main algorithm of quick hull.
+        // The main algorithm of quickhull.
         //
         // For each face that has outside points:
         //
@@ -284,12 +294,6 @@ impl ConvexHull3d {
             i += 1;
         }
 
-        /* TODO: Make this validation optional
-        if !self.is_convex() {
-            return Err(ConvexHull3dError::RoundOffError("concave".to_string()));
-        }
-        */
-
         Ok(())
     }
 
@@ -324,25 +328,23 @@ impl ConvexHull3d {
     }
 
     /// Computes the volume of the convex hull.
-    /// Sums up volumes of tetrahedrons from an arbitrary point to all other points
-    ///
-    /// Returns non-negative value, for extremely small objects might return 0.0
+    #[inline]
     pub fn volume(&self) -> f32 {
-        let indices = self.indices();
-        let reference_point = self.points[indices[0][0] as usize].extend(1.0);
-        let mut volume = 0.0;
-        for i in 1..indices.len() {
-            let mut mat = Mat4::ZERO;
-            *mat.col_mut(0) = self.points[indices[i - 1][0] as usize].extend(1.0);
-            *mat.col_mut(1) = self.points[indices[i - 1][1] as usize].extend(1.0);
-            *mat.col_mut(2) = self.points[indices[i - 1][2] as usize].extend(1.0);
-            *mat.col_mut(3) = reference_point;
-            volume += mat.determinant().max(0.0);
-        }
-        volume / 6.0
+        self.indices
+            .iter()
+            .map(|triangle| {
+                let p0 = self.points[triangle[0] as usize];
+                let p1 = self.points[triangle[1] as usize];
+                let p2 = self.points[triangle[2] as usize];
+
+                // Volume of the tetrahedron formed by the triangle and the origin.
+                (p0.dot(p1.cross(p2))).abs() / 6.0
+            })
+            .sum()
     }
 
     /// Computes the point on the convex hull that is furthest in the given direction.
+    #[inline]
     pub fn support_point(&self, direction: Vec3A) -> Vec3A {
         let mut max = self.points[0].dot(direction);
         let mut index = 0;
@@ -640,32 +642,22 @@ mod tests {
     fn four_points_coincident() {
         let points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
 
-        let result = ConvexHull3d::try_from_points(&points, None);
-        assert!(
-            matches!(
-                result,
-                Err(ConvexHull3dError::DegenerateInput(
-                    DegenerateInput::Coincident
-                ))
-            ),
-            "{result:?} should be 'coincident' error"
-        );
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for coincident points");
+        let (vertices, indices) = result.vertices_indices();
+        assert_eq!(vertices, vec![Vec3A::splat(1.0)]);
+        assert_eq!(indices, vec![[0; 3]; 2]);
     }
 
     #[test]
     fn four_points_collinear() {
         let mut points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
         points[0].x += f32::EPSILON;
-        let result = ConvexHull3d::try_from_points(&points, None);
-        assert!(
-            matches!(
-                result,
-                Err(ConvexHull3dError::DegenerateInput(
-                    DegenerateInput::Collinear
-                ))
-            ),
-            "{result:?} should be 'collinear' error"
-        );
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for collinear points");
+        let (vertices, indices) = result.vertices_indices();
+        assert_eq!(vertices, vec![points[1], points[0]]);
+        assert_eq!(indices, vec![[0, 1, 0], [1, 0, 0]]);
     }
 
     #[test]
@@ -673,16 +665,11 @@ mod tests {
         let mut points = (0..4).map(|_| Vec3A::splat(1.0)).collect::<Vec<_>>();
         points[0].x += f32::EPSILON;
         points[1].y += f32::EPSILON;
-        let result = ConvexHull3d::try_from_points(&points, None);
-        assert!(
-            matches!(
-                result,
-                Err(ConvexHull3dError::DegenerateInput(
-                    DegenerateInput::Coplanar
-                ))
-            ),
-            "{result:?} should be 'coplanar' error"
-        );
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for coplanar points");
+        let (vertices, indices) = result.vertices_indices();
+        assert_eq!(vertices, vec![points[2], points[0], points[1]]);
+        assert_eq!(indices, vec![[0, 1, 2], [2, 1, 0]]);
     }
 
     #[test]
@@ -691,10 +678,11 @@ mod tests {
         points[0].x += 3.0 * f32::EPSILON;
         points[1].y += 3.0 * f32::EPSILON;
         points[2].z += 3.0 * f32::EPSILON;
-        let result = ConvexHull3d::try_from_points(&points, None);
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for tetrahedron");
         assert_eq!(
-            4.3790577010150533e-47,
-            result.expect("this should compute ok").volume()
+            result.volume(),
+            points[0].dot(points[1].cross(points[2])).abs() / 6.0
         );
     }
 
@@ -704,8 +692,9 @@ mod tests {
         points[0].x += 1.0 * f32::EPSILON;
         points[1].y += 1.0 * f32::EPSILON;
         points[2].z += 2.0 * f32::EPSILON;
-        let result = ConvexHull3d::try_from_points(&points, None);
-        assert!(result.expect("this should compute ok").volume() > 0.0);
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for tetrahedron");
+        assert!(result.volume() > 0.0);
     }
 
     #[test]
@@ -735,7 +724,7 @@ mod tests {
         let (_v, i) = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6], None)
             .unwrap()
             .vertices_indices();
-        assert_eq!(i.len(), 8 * 3);
+        assert_eq!(i.len(), 8);
     }
 
     #[test]
@@ -753,7 +742,7 @@ mod tests {
         let (_v, i) = ConvexHull3d::try_from_points(&points, None)
             .unwrap()
             .vertices_indices();
-        assert_eq!(i.len(), 8 * 3);
+        assert_eq!(i.len(), 8);
     }
 
     #[test]
@@ -769,7 +758,7 @@ mod tests {
         let (_v, i) = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None)
             .unwrap()
             .vertices_indices();
-        assert_eq!(i.len(), 6 * 2 * 3);
+        assert_eq!(i.len(), 6 * 2);
     }
 
     #[test]
@@ -823,11 +812,13 @@ mod tests {
         let p6 = Vec3A::new(-1.0, 1.0, 10.0);
         let p7 = Vec3A::new(-1.0, -1.0, 10.0);
         let p8 = Vec3A::new(-1.0, -1.0, 10.0);
-        assert!(
-            ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None).is_err_and(
-                |err| err == ConvexHull3dError::DegenerateInput(DegenerateInput::Coplanar)
-            )
-        );
+
+        let result = ConvexHull3d::try_from_points(&[p1, p2, p3, p4, p5, p6, p7, p8], None)
+            .expect("could not compute hull for flat points");
+        let (vertices, indices) = result.vertices_indices();
+
+        assert_eq!(vertices, vec![p3, p1, p5, p7]);
+        assert_eq!(indices, vec![[0, 1, 2], [0, 2, 3], [3, 1, 0], [3, 2, 1]]);
     }
 
     #[test]
@@ -835,9 +826,13 @@ mod tests {
         let points = (0..10)
             .map(|i| Vec3A::new(i as f32, 1.0, 10.0))
             .collect::<Vec<_>>();
-        assert!(ConvexHull3d::try_from_points(&points, None).is_err_and(
-            |err| err == ConvexHull3dError::DegenerateInput(DegenerateInput::Collinear)
-        ));
+
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for line points");
+        let (vertices, indices) = result.vertices_indices();
+
+        assert_eq!(vertices, vec![points[0], points[9]]);
+        assert_eq!(indices, vec![[0, 1, 0], [1, 0, 0]]);
     }
 
     #[test]
@@ -922,9 +917,8 @@ mod tests {
             .vertices_indices();
     }
 
-    /// Useful for fuzzing and profiling
-    /// creates a sea-urchin like point cloud
-    /// with points distributed arbitrarily within a sphere
+    /// Useful for fuzzing and profiling.
+    /// Creates a sea-urchin like point cloud with points distributed arbitrarily within a sphere.
     #[test]
     fn heavy_sea_urchin_test() {
         use rand::prelude::{Distribution, SeedableRng, SliceRandom};

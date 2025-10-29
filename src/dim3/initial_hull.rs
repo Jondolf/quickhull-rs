@@ -93,8 +93,8 @@ pub fn init_tetrahedron(
         2 => {
             // The hull is a triangle.
             // Project the points onto the plane defined by the two largest eigenvectors.
-            let u = Vec3A::from(eig.eigenvectors.x_axis.normalize());
-            let v = Vec3A::from(eig.eigenvectors.y_axis.normalize());
+            let u = Vec3A::from(eig.eigenvectors.y_axis.normalize());
+            let v = Vec3A::from(eig.eigenvectors.z_axis.normalize());
 
             let mut subspace_points: Vec<Vec2> = Vec::with_capacity(normalized_points.len());
             for p in normalized_points {
