@@ -111,7 +111,7 @@ impl ConvexHull3d {
                     indices: faces,
                 });
             }
-            InitialConvexHull3d::Tetrahedron(initial_faces) => {
+            InitialConvexHull3d::Polyhedron(initial_faces) => {
                 faces = initial_faces;
             }
         }

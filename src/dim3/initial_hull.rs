@@ -16,7 +16,7 @@ pub enum InitialConvexHull3d {
     Point(Vec<Vec3A>, Vec<[u32; 3]>),
     Segment(Vec<Vec3A>, Vec<[u32; 3]>),
     Triangle(Vec<Vec3A>, Vec<[u32; 3]>),
-    Tetrahedron(Vec<TriangleFace>),
+    Polyhedron(Vec<TriangleFace>),
 }
 
 fn cov(points: &[Vec3A]) -> SymmetricMat3 {
@@ -235,7 +235,7 @@ pub fn init_tetrahedron(
                 validate_face_connectivity(FaceId(1), &faces);
             }
 
-            Ok(InitialConvexHull3d::Tetrahedron(faces))
+            Ok(InitialConvexHull3d::Polyhedron(faces))
         }
         _ => unreachable!("Rank can only be 0, 1, 2, or 3."),
     }
