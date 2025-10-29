@@ -6,58 +6,24 @@ mod normalize;
 mod triangle_face;
 mod validation;
 
-pub use triangle_face::{EdgeIndex, FaceHandle, FaceId, TriangleFace};
-
 use crate::dim3::{
     initial_hull::{init_tetrahedron, InitialConvexHull3d},
-    triangle_face::PointId,
+    triangle_face::{EdgeIndex, FaceHandle, FaceId, PointId, TriangleFace},
 };
-
 use glam::Vec3A;
+use thiserror::Error;
 
 /// An error returned during [`ConvexHull3d`] construction.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum ConvexHull3dError {
-    /// The given point set is empty, so no convex hull could be computed.
-    Empty,
-    /// The convex hull algorithm encountered degeneracies.
-    Degenerated,
-    /// The given point set cannot produce a valid convex hull.
-    DegenerateInput(DegenerateInput),
     /// Could not find a support point in the given direction.
+    #[error("Input points are either invalid (NaN/Inf) or nearly coplanar.")]
     MissingSupportPoint,
-    /// A round-off error.
-    RoundOffError(String),
+    /// An error in the algorithm itself. Please report is as a bug
+    /// with a minimal reproducible example.
+    #[error("Internal error: {0}")]
+    InternalError(&'static str),
 }
-
-/// The type of degeneracy for when attempting to compute a convex hull for a point set.
-#[derive(Debug, Clone, PartialEq)]
-pub enum DegenerateInput {
-    /// The input points are approximately equal.
-    Coincident,
-    /// The input points are approximately on the same line.
-    Collinear,
-    /// The input points are approximately on the same plane.
-    Coplanar,
-}
-
-impl core::fmt::Display for ConvexHull3dError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match &self {
-            ConvexHull3dError::Empty => write!(f, "empty"),
-            ConvexHull3dError::Degenerated => write!(f, "degenerated"),
-            ConvexHull3dError::DegenerateInput(kind) => write!(f, "degenerate input: {:?}", kind),
-            ConvexHull3dError::MissingSupportPoint => {
-                write!(f, "could not find a support point in the given direction")
-            }
-            ConvexHull3dError::RoundOffError(msg) => {
-                write!(f, "erroneous results by roundoff error: {}", msg)
-            }
-        }
-    }
-}
-
-impl core::error::Error for ConvexHull3dError {}
 
 /// A 3D [convex hull] representing the smallest convex set containing
 /// all input points in a given point set.
@@ -107,22 +73,25 @@ impl ConvexHull3d {
     /// `max_iter` specifies the maximum number of iterations to perform.
     /// If `None`, the algorithm will run until completion.
     ///
+    /// Point sets with fewer than 4 points will produce degenerate hulls
+    /// representing a point, line segment, or triangle. If this is not desired,
+    /// check for the number of input points before constructing the hull.
+    ///
     /// # Errors
     ///
     /// Returns a [`ConvexHull3dError`] if hull construction fails.
+    /// Possible errors include:
+    ///
     pub fn try_from_points(
         points: &[Vec3A],
         max_iter: Option<usize>,
     ) -> Result<Self, ConvexHull3dError> {
-        let num_points = points.len();
-
-        if num_points == 0 {
-            return Err(ConvexHull3dError::Empty);
-        }
-
-        if num_points <= 3 {
-            // TODO: Rename this?
-            return Err(ConvexHull3dError::Degenerated);
+        if points.is_empty() {
+            // Empty hull.
+            return Ok(ConvexHull3d {
+                points: Vec::new(),
+                indices: Vec::new(),
+            });
         }
 
         // Construct a normalized point cloud for better numerical stability.
@@ -271,8 +240,8 @@ impl ConvexHull3d {
                     .any(|f| f.valid && !f.affinely_dependent);
 
                 if is_any_valid {
-                    return Err(ConvexHull3dError::RoundOffError(
-                        "horizon is empty".to_string(),
+                    return Err(ConvexHull3dError::InternalError(
+                        "Could not compute horizon.",
                     ));
                 }
 
@@ -637,6 +606,55 @@ mod tests {
     use crate::dim3::triangle_face::TriangleFace;
 
     use super::*;
+
+    #[test]
+    fn empty_point_set() {
+        let points: Vec<Vec3A> = Vec::new();
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for empty point set");
+        let (vertices, indices) = result.vertices_indices();
+        assert!(vertices.is_empty());
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn single_point() {
+        let points = vec![Vec3A::splat(1.0)];
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for single point");
+        let (vertices, indices) = result.vertices_indices();
+        assert_eq!(vertices, vec![Vec3A::splat(1.0)]);
+        assert_eq!(indices, vec![[0; 3]; 2]);
+    }
+
+    #[test]
+    fn two_points() {
+        let points = vec![
+            Vec3A::splat(1.0),
+            Vec3A::splat(2.0),
+            Vec3A::splat(1.0),
+            Vec3A::splat(2.0),
+        ];
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for two points");
+        let (vertices, indices) = result.vertices_indices();
+        assert_eq!(vertices, vec![Vec3A::splat(1.0), Vec3A::splat(2.0)]);
+        assert_eq!(indices, vec![[0, 1, 0], [1, 0, 0]]);
+    }
+
+    #[test]
+    fn three_points() {
+        let points = vec![
+            Vec3A::new(0.0, 0.0, 0.0),
+            Vec3A::new(1.0, 0.0, 0.0),
+            Vec3A::new(0.0, 1.0, 0.0),
+        ];
+        let result = ConvexHull3d::try_from_points(&points, None)
+            .expect("could not compute hull for three points");
+        let (vertices, indices) = result.vertices_indices();
+        assert_eq!(vertices, points);
+        assert_eq!(indices, vec![[0, 1, 2], [2, 1, 0]]);
+    }
 
     #[test]
     fn four_points_coincident() {

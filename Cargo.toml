@@ -15,6 +15,7 @@ glam = "0.30"
 glam_matrix_extras = { git = "https://github.com/Jondolf/glam_matrix_extensions" }
 robust = "1.1.0"
 approx = "0.5"
+thiserror = "2.0"
 
 # Hashing
 foldhash = "0.2"

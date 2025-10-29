@@ -12,8 +12,6 @@ use crate::{
 };
 
 /// The initial convex hull structure built from the input points.
-///
-/// If the input points are degenerate, the hull may be a point, line, or triangle.
 pub enum InitialConvexHull3d {
     Point(Vec<Vec3A>, Vec<[u32; 3]>),
     Segment(Vec<Vec3A>, Vec<[u32; 3]>),
@@ -75,7 +73,7 @@ pub fn init_tetrahedron(
         .eigenvalues
         .to_array()
         .iter()
-        .filter(|v| relative_ne!(**v, 0.0, epsilon = 1e-7))
+        .filter(|v| relative_ne!(**v, 0.0, epsilon = 1e-6))
         .count();
 
     match rank {
@@ -148,7 +146,9 @@ pub fn init_tetrahedron(
             }
 
             if point_ids[0] == PointId::PLACEHOLDER || point_ids[1] == PointId::PLACEHOLDER {
-                return Err(ConvexHull3dError::MissingSupportPoint);
+                return Err(ConvexHull3dError::InternalError(
+                    "Could not find initial segment points.",
+                ));
             }
 
             // The third vertex should be the one farthest from the line segment
@@ -172,7 +172,9 @@ pub fn init_tetrahedron(
             }
 
             if point_ids[2] == PointId::PLACEHOLDER {
-                return Err(ConvexHull3dError::MissingSupportPoint);
+                return Err(ConvexHull3dError::InternalError(
+                    "Could not find initial triangle point.",
+                ));
             }
 
             // Create two faces with opposite normals.
@@ -229,8 +231,8 @@ pub fn init_tetrahedron(
             // TODO: Make this optional behind a feature flag or something.
             #[cfg(debug_assertions)]
             {
-            validate_face_connectivity(FaceId(0), &faces);
-            validate_face_connectivity(FaceId(1), &faces);
+                validate_face_connectivity(FaceId(0), &faces);
+                validate_face_connectivity(FaceId(1), &faces);
             }
 
             Ok(InitialConvexHull3d::Tetrahedron(faces))

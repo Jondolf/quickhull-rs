@@ -18,4 +18,4 @@ mod dim2;
 mod dim3;
 
 pub use dim2::ConvexHull2d;
-pub use dim3::{ConvexHull3d, ConvexHull3dError, DegenerateInput};
+pub use dim3::{ConvexHull3d, ConvexHull3dError};
