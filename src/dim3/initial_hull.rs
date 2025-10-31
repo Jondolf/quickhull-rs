@@ -2,10 +2,11 @@ use approx::relative_ne;
 use glam::{Vec2, Vec3, Vec3A};
 use glam_matrix_extras::{SymmetricEigen3, SymmetricMat3};
 
+#[cfg(debug_assertions)]
+use crate::dim3::validation::validate_face_connectivity;
 use crate::{
     dim3::{
         triangle_face::{PointId, TriangleFace},
-        validation::validate_face_connectivity,
         FaceId,
     },
     ConvexHull2d, ConvexHull3dError,
