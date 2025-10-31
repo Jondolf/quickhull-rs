@@ -4,6 +4,8 @@
 mod initial_hull;
 mod normalize;
 mod triangle_face;
+// TODO: Make validation methods public, and move auto-validation behind a feature flag.
+#[cfg(debug_assertions)]
 mod validation;
 
 use crate::dim3::{
