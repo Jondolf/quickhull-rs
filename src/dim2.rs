@@ -1,7 +1,7 @@
 // Adapted from geo:
 // https://github.com/georust/geo/blob/8940db79aa6aa4ec8820d6328c68a2ae08ac8fdc/geo/src/algorithm/convex_hull/qhull.rs
 
-use glam::DVec2;
+use glam::Vec2;
 
 /// A 2D [convex hull] representing the smallest convex set containing
 /// all input points in a given point set.
@@ -13,15 +13,15 @@ use glam::DVec2;
 /// # Example
 ///
 /// ```
-/// use glam::DVec2;
+/// use glam::Vec2;
 /// use quickhull::ConvexHull2d;
 ///
 /// let points = vec![
-///     DVec2::new(0.0, 0.0),
-///     DVec2::new(1.0, 0.0),
-///     DVec2::new(0.0, 1.0),
-///     DVec2::new(1.0, 1.0),
-///     DVec2::new(0.5, 0.5),
+///     Vec2::new(0.0, 0.0),
+///     Vec2::new(1.0, 0.0),
+///     Vec2::new(0.0, 1.0),
+///     Vec2::new(1.0, 1.0),
+///     Vec2::new(0.5, 0.5),
 /// ];
 ///
 /// // Create the convex hull.
@@ -34,15 +34,15 @@ use glam::DVec2;
 ///     points,
 ///     &[
 ///         // The points may not be in the same order as the input.
-///         DVec2::new(1.0, 0.0),
-///         DVec2::new(1.0, 1.0),
-///         DVec2::new(0.0, 1.0),
-///         DVec2::new(0.0, 0.0),
+///         Vec2::new(1.0, 0.0),
+///         Vec2::new(1.0, 1.0),
+///         Vec2::new(0.0, 1.0),
+///         Vec2::new(0.0, 0.0),
 ///     ],
 /// );
 /// ```
 pub struct ConvexHull2d {
-    points: Vec<DVec2>,
+    points: Vec<Vec2>,
 }
 
 impl ConvexHull2d {
@@ -51,7 +51,7 @@ impl ConvexHull2d {
     /// This allocates a new vector for the points. To avoid this allocation,
     /// consider using [`from_mut_points`](Self::from_mut_points).
     #[inline]
-    pub fn from_points(points: &[DVec2]) -> Self {
+    pub fn from_points(points: &[Vec2]) -> Self {
         Self::from_mut_points(&mut points.to_vec())
     }
 
@@ -60,7 +60,7 @@ impl ConvexHull2d {
     /// The input slice may be reordered and truncated during hull construction.
     /// This is more efficient than [`from_points`](Self::from_points), as it avoids an allocation.
     #[inline]
-    pub fn from_mut_points(mut points: &mut [DVec2]) -> Self {
+    pub fn from_mut_points(mut points: &mut [Vec2]) -> Self {
         if points.len() <= 3 {
             return Self::trivial_hull(points.to_vec());
         }
@@ -122,18 +122,37 @@ impl ConvexHull2d {
         Self { points: hull }
     }
 
+    /// Computes the indices of the convex hull points within the original point set.
+    ///
+    /// The returned indices are in counterclockwise order.
+    #[inline]
+    pub fn indices_from_points(points: &[Vec2]) -> Vec<usize> {
+        // TODO: Optimize this.
+        // TODO: Handle duplicate points.
+        let hull = Self::from_points(points);
+        hull.points()
+            .iter()
+            .map(|hull_point| {
+                points
+                    .iter()
+                    .position(|point| *point == *hull_point)
+                    .unwrap()
+            })
+            .collect()
+    }
+
     /// Returns the points of the convex hull in counterclockwise order.
     ///
     /// This consumes the convex hull. If you want a reference to the points,
     /// consider using [`points_ref`](Self::points_ref) instead.
     #[inline]
-    pub fn points(self) -> Vec<DVec2> {
+    pub fn points(self) -> Vec<Vec2> {
         self.points
     }
 
     /// Returns a reference to the points of the convex hull in counterclockwise order.
     #[inline]
-    pub fn points_ref(&self) -> &[DVec2] {
+    pub fn points_ref(&self) -> &[Vec2] {
         &self.points
     }
 
@@ -145,7 +164,7 @@ impl ConvexHull2d {
     /// # Panics
     ///
     /// Panics with `debug_assertions` enabled if `points.len() > 3`.
-    fn trivial_hull(mut points: Vec<DVec2>) -> Self {
+    fn trivial_hull(mut points: Vec<Vec2>) -> Self {
         debug_assert!(points.len() <= 3);
 
         points.sort_unstable_by(lexicographic_cmp);
@@ -166,7 +185,7 @@ impl ConvexHull2d {
     }
 
     // Recursively computes the convex hull of a subset of points.
-    fn hull_set(a: DVec2, b: DVec2, mut points: &mut [DVec2], hull: &mut Vec<DVec2>) {
+    fn hull_set(a: Vec2, b: Vec2, mut points: &mut [Vec2], hull: &mut Vec<Vec2>) {
         if points.is_empty() {
             return;
         }
@@ -208,7 +227,7 @@ impl ConvexHull2d {
 /// - `orientation < 0`: clockwise
 /// - `orientation == 0`: collinear
 #[inline]
-fn orient2d(a: DVec2, b: DVec2, c: DVec2) -> f64 {
+fn orient2d(a: Vec2, b: Vec2, c: Vec2) -> f64 {
     use robust::Coord;
     robust::orient2d(
         Coord { x: a.x, y: a.y },
@@ -219,13 +238,13 @@ fn orient2d(a: DVec2, b: DVec2, c: DVec2) -> f64 {
 
 /// Returns `true` if the points `a`, `b`, `c` are oriented counterclockwise.
 #[inline]
-fn is_ccw(a: DVec2, b: DVec2, c: DVec2) -> bool {
+fn is_ccw(a: Vec2, b: Vec2, c: Vec2) -> bool {
     orient2d(a, b, c) > 0.0
 }
 
 /// Compares two 2D points first by `x`, then by `y`.
 #[inline]
-fn lexicographic_cmp(a: &DVec2, b: &DVec2) -> std::cmp::Ordering {
+fn lexicographic_cmp(a: &Vec2, b: &Vec2) -> std::cmp::Ordering {
     a.x.partial_cmp(&b.x)
         .unwrap()
         .then(a.y.partial_cmp(&b.y).unwrap())
@@ -280,28 +299,28 @@ fn swap_with_first_and_remove<'a, T>(slice: &mut &'a mut [T], index: usize) -> &
 
 #[cfg(test)]
 mod test {
-    use glam::dvec2;
+    use glam::vec2;
 
     use super::*;
 
     #[test]
     fn hull_correct() {
         let points = vec![
-            dvec2(0.0, 10.0),
-            dvec2(1.0, 1.0),
-            dvec2(10.0, 0.0),
-            dvec2(1.0, -1.0),
-            dvec2(0.0, -10.0),
-            dvec2(-1.0, -1.0),
-            dvec2(-10.0, 0.0),
-            dvec2(-1.0, 1.0),
-            dvec2(0.0, 10.0),
+            vec2(0.0, 10.0),
+            vec2(1.0, 1.0),
+            vec2(10.0, 0.0),
+            vec2(1.0, -1.0),
+            vec2(0.0, -10.0),
+            vec2(-1.0, -1.0),
+            vec2(-10.0, 0.0),
+            vec2(-1.0, 1.0),
+            vec2(0.0, 10.0),
         ];
         let expected = vec![
-            dvec2(0.0, -10.0),
-            dvec2(10.0, 0.0),
-            dvec2(0.0, 10.0),
-            dvec2(-10.0, 0.0),
+            vec2(0.0, -10.0),
+            vec2(10.0, 0.0),
+            vec2(0.0, 10.0),
+            vec2(-10.0, 0.0),
         ];
         let result = ConvexHull2d::from_points(&points).points();
         assert_eq!(result, expected);
@@ -310,18 +329,18 @@ mod test {
     #[test]
     fn ccw() {
         let points = vec![
-            dvec2(1.0, 0.0),
-            dvec2(2.0, 1.0),
-            dvec2(1.75, 1.1),
-            dvec2(1.0, 2.0),
-            dvec2(0.0, 1.0),
-            dvec2(1.0, 0.0),
+            vec2(1.0, 0.0),
+            vec2(2.0, 1.0),
+            vec2(1.75, 1.1),
+            vec2(1.0, 2.0),
+            vec2(0.0, 1.0),
+            vec2(1.0, 0.0),
         ];
         let expected = [
-            dvec2(1.0, 0.0),
-            dvec2(2.0, 1.0),
-            dvec2(1.0, 2.0),
-            dvec2(0.0, 1.0),
+            vec2(1.0, 0.0),
+            vec2(2.0, 1.0),
+            vec2(1.0, 2.0),
+            vec2(0.0, 1.0),
         ];
         let result = ConvexHull2d::from_points(&points).points();
         assert_eq!(result, expected);
@@ -329,8 +348,8 @@ mod test {
 
     #[test]
     fn trivial_collinear() {
-        let points = vec![dvec2(0.0, 0.0), dvec2(1.0, 1.0), dvec2(2.0, 2.0)];
-        let expected = vec![dvec2(0.0, 0.0), dvec2(2.0, 2.0)];
+        let points = vec![vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(2.0, 2.0)];
+        let expected = vec![vec2(0.0, 0.0), vec2(2.0, 2.0)];
         let result = ConvexHull2d::from_points(&points).points();
         assert_eq!(result, expected);
     }
@@ -338,17 +357,17 @@ mod test {
     #[test]
     fn non_trivial_collinear() {
         let points = vec![
-            dvec2(0.0, 0.0),
-            dvec2(1.0, 1.0),
-            dvec2(2.0, 2.0),
-            dvec2(0.0, 2.0),
-            dvec2(2.0, 0.0),
+            vec2(0.0, 0.0),
+            vec2(1.0, 1.0),
+            vec2(2.0, 2.0),
+            vec2(0.0, 2.0),
+            vec2(2.0, 0.0),
         ];
         let expected = vec![
-            dvec2(2.0, 0.0),
-            dvec2(2.0, 2.0),
-            dvec2(0.0, 2.0),
-            dvec2(0.0, 0.0),
+            vec2(2.0, 0.0),
+            vec2(2.0, 2.0),
+            vec2(0.0, 2.0),
+            vec2(0.0, 0.0),
         ];
         let result = ConvexHull2d::from_points(&points).points();
         assert_eq!(result, expected);

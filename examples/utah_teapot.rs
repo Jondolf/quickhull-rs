@@ -1,3 +1,5 @@
+//! Demonstrates computing the convex hull of the Utah teapot model.
+
 use bevy::{
     asset::RenderAssetUsages,
     camera::Exposure,
@@ -6,7 +8,6 @@ use bevy::{
     prelude::*,
     scene::SceneInstanceReady,
 };
-use glam::DVec3;
 
 fn main() {
     App::new()
@@ -83,7 +84,7 @@ fn on_scene_ready(
         points.extend(
             vertex_positions
                 .iter()
-                .map(|&[x, y, z]| DVec3::new(x as f64, y as f64, z as f64)),
+                .map(|&[x, y, z]| Vec3A::new(x, y, z)),
         );
     }
 
@@ -97,11 +98,8 @@ fn on_scene_ready(
     };
 
     let (vertices, indices) = hull.vertices_indices();
-    let mesh_vertices: Vec<[f32; 3]> = vertices
-        .iter()
-        .map(|v| [v.x as f32, v.y as f32, v.z as f32])
-        .collect();
-    let mesh_indices: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+    let mesh_vertices: Vec<[f32; 3]> = vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
+    let mesh_indices: Vec<u32> = indices.iter().flatten().cloned().collect();
 
     // Create a mesh from the hull.
     let hull_mesh = Mesh::new(
